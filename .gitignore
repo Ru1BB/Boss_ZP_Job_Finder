@@ -1,0 +1,9 @@
+node_modules/
+coverage/
+*.local.json
+*.log
+local-private/
+tmp/pdfs/
+.env
+.env.*
+*.pdf

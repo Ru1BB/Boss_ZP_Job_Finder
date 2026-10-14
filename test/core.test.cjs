@@ -1,0 +1,174 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const C = require('../src/core.js');
+const now = Date.parse('2026-10-14T02:00:00Z');
+const setup = () => {
+  const c = { ...C.defaults(), autoSend: true }, s = C.emptyState();
+  s.task = C.createTask(c, now);
+  const entry = { key: C.pair({ jobId: 'j', recruiterId: 'r' }), status: 'eligible' };
+  s.entries[entry.key] = entry;
+  return { c, s, entry };
+};
+test('defaults implement Beijing internships and independent refresh/send clocks', () => {
+  const c = C.defaults();
+  assert.equal(c.internshipOnly, true); assert.equal(c.requiredCity, '北京');
+  assert.equal(c.autoSend, false); assert.equal(c.sendIntervalSeconds, 180);
+  assert.equal(C.randomDelay(c, () => 0), 10000);
+  assert.equal(C.randomDelay(c, () => 0.999999), 60000);
+  assert.equal(C.randomDelay(c, () => 0.5), 35000);
+});
+test('configuration rejects invalid schedules, bounds and inverted jitter', () => {
+  for (const overrides of [{ maxContacts: 0 }, { threshold: NaN }, { sendIntervalSeconds: 1.5 },
+    { refreshMinSeconds: 61, refreshMaxSeconds: 60 }, { scheduleEnabled: true },
+    { scheduleEnabled: true, startTime: '09:00', stopTime: '09:00' }]) {
+    assert.throws(() => C.validateConfig({ ...C.defaults(), ...overrides }));
+  }
+});
+test('provider endpoints and models are fixed and reject unknown providers', () => {
+  assert.equal(C.fixedConfig().baseUrl, 'https://maas.qianwenaiapi.com/compatible-mode/v1');
+  assert.equal(C.fixedConfig({ provider: 'qwen', model: 'override' }).model, 'qwen3.8-flash');
+  const deepseek = C.fixedConfig({ provider: 'deepseek', model: 'override' });
+  assert.equal(deepseek.baseUrl, 'https://api.deepseek.com'); assert.equal(deepseek.model, 'deepseek-flash');
+  assert.throws(() => C.fixedConfig({ provider: 'other' }));
+  assert.throws(() => C.fixedConfig({ provider: '__proto__' }));
+});
+test('legacy endpoint migration clears credentials only when destination changes', () => {
+  const same = C.fixedConfig({ ...C.defaults(), apiKey: 'test-key', model: 'legacy-model' });
+  assert.equal(same.apiKey, 'test-key'); assert.equal(same.model, 'qwen3.8-flash');
+  const changed = C.fixedConfig({ ...C.defaults(), apiKey: 'test-key', baseUrl: 'https://old.example/v1', autoSend: true });
+  assert.equal(changed.apiKey, ''); assert.equal(changed.autoSend, false);
+  assert.equal(changed.baseUrl, C.PROVIDERS.qwen.baseUrl);
+});
+test('Beijing internship hard filter never infers from body mentioning the city', () => {
+  const c = C.defaults();
+  assert.equal(C.hardFilter({ employmentType: '全职', city: '北京' }, c).status, 'rejected');
+  assert.equal(C.hardFilter({ employmentType: '实习', city: '上海' }, c).status, 'rejected');
+  assert.equal(C.hardFilter({ employmentType: '实习', city: '北京·海淀区' }, c).status, 'pass');
+  assert.equal(C.hardFilter({ description: '北京实习生', employmentType: '', city: '' }, c).status, 'review');
+  assert.equal(C.hardFilter({ employmentType: '实习/全职', city: '北京' }, c).status, 'pass');
+});
+test('internship text and daily salary are alternative positive signals', () => {
+  const c = C.defaults();
+  for (const salary of ['200-300元/天', '150／天', '日薪200元', '每日 200 元', '200元一天', '按天计薪']) {
+    assert.equal(C.hardFilter({ employmentType: '全职', salary, city: '北京' }, c).status, 'pass', salary);
+  }
+  assert.equal(C.hardFilter({ description: '招聘开发实习生', salary: '4-6K/月', city: '北京' }, c).status, 'pass');
+  assert.equal(C.hardFilter({ title: '实习生', city: '北京' }, c).status, 'pass');
+  assert.equal(C.hardFilter({ salary: '8-12K/月', city: '北京' }, c).status, 'review');
+  assert.equal(C.hardFilter({ salary: '200元/天', city: '上海' }, c).status, 'rejected');
+  assert.equal(C.hardFilter({ salary: '200元/天', city: '' }, c).status, 'review');
+  assert.equal(C.hardFilter({ description: '餐补20元/天', salary: '8K/月', employmentType: '全职', city: '北京' }, c).status, 'rejected');
+});
+test('AI disclosure is appended once to greetings and replies, including old queued text', () => {
+  assert.equal(C.aiMessage('您好'), '您好\n' + C.AI_NOTICE);
+  assert.equal(C.aiMessage(C.aiMessage('您好')), C.aiMessage('您好'));
+  assert.equal(C.aiMessage('您好\n' + C.AI_NOTICE + '\n' + C.AI_NOTICE), C.aiMessage('您好'));
+  assert.equal(C.aiMessage(''), '');
+  assert.ok(C.analysis({ score: 90, suitable: true, uncertain: false, reason: '符合', doubts: [], greeting: '您好' }).greeting.endsWith(C.AI_NOTICE));
+  assert.ok(C.reply({ action: 'reply', text: '我有项目经验', reason: '有依据', evidence: ['项目经验'] }).text.endsWith(C.AI_NOTICE));
+});
+test('daily Beijing window start inclusive/end exclusive independent of host timezone', () => {
+  const c = { ...C.defaults(), scheduleEnabled: true, startTime: '09:00', stopTime: '18:00' };
+  assert.equal(C.schedule(c, Date.parse('2026-10-14T00:59:59Z')).active, false);
+  assert.equal(C.schedule(c, Date.parse('2026-10-14T01:00:00Z')).active, true);
+  assert.equal(C.schedule(c, Date.parse('2026-10-14T10:00:00Z')).active, false);
+});
+test('overnight window has same ID on both sides of midnight', () => {
+  const c = { ...C.defaults(), scheduleEnabled: true, startTime: '22:00', stopTime: '02:00' };
+  const a = C.schedule(c, Date.parse('2026-10-14T15:00:00Z'));
+  const b = C.schedule(c, Date.parse('2026-10-14T17:00:00Z'));
+  assert.equal(a.active, true); assert.equal(b.active, true); assert.equal(a.id, b.id);
+  assert.equal(C.schedule(c, Date.parse('2026-10-14T18:00:00Z')).active, false);
+});
+test('resume from frozen tab cannot send after deadline or in next window', () => {
+  const { c, s, entry } = setup();
+  s.task.endAt = now + 1000;
+  assert.equal(C.canSend(s, c, now + 1000, 'contact', entry), false);
+  c.scheduleEnabled = true; c.startTime = '09:00'; c.stopTime = '18:00';
+  s.task.endAt = now + 86400000 * 5; s.task.windowId = C.schedule(c, now).id;
+  assert.equal(C.allowed(s, c, now + 86400000), false);
+});
+test('manual new task resets quota, persistent spacing and dedupe survive', () => {
+  const { c, s, entry } = setup();
+  C.reserve(s, c, now, 'contact', entry, { text: '你好' });
+  assert.equal(s.task.contacts, 1); assert.equal(entry.status, 'uncertain');
+  s.task = C.createTask(c, now + 1000);
+  assert.equal(s.task.contacts, 0); assert.equal(s.lastSendAt, now);
+  assert.equal(s.entries[entry.key].status, 'uncertain');
+  assert.equal(C.canSend(s, c, now + 1000, 'contact', entry), false);
+});
+test('all outbound types share spacing; quota does not stop established chat', () => {
+  const { c, s, entry } = setup(); c.maxContacts = 1;
+  C.reserve(s, c, now, 'contact', entry, {}); entry.status = 'contacted';
+  assert.equal(C.canSend(s, c, now + 180000, 'contact', entry), false);
+  assert.equal(C.canSend(s, c, now + 179999, 'reply', entry), false);
+  assert.equal(C.canSend(s, c, now + 180000, 'reply', entry), true);
+  C.reserve(s, c, now + 180000, 'reply', entry, {});
+  assert.equal(C.canSend(s, c, now + 180001, 'resume', entry), false);
+});
+test('unowned, handoff and exhausted-reply conversations cannot auto reply', () => {
+  const { c, s, entry } = setup();
+  assert.equal(C.canSend(s, c, now, 'reply', null), false);
+  assert.equal(C.canSend(s, c, now, 'reply', entry), false);
+  entry.status = 'contacted'; entry.handoff = true;
+  assert.equal(C.canSend(s, c, now, 'reply', entry), false);
+  entry.handoff = false; s.task.replies[entry.key] = 5;
+  assert.equal(C.canSend(s, c, now, 'reply', entry), false);
+});
+test('stopping cancels permission for every pending outbound type', () => {
+  const { c, s, entry } = setup(); entry.status = 'contacted'; s.task.status = 'stopped';
+  for (const kind of ['contact', 'reply', 'resume']) assert.equal(C.canSend(s, c, now, kind, entry), false);
+});
+test('job dedupe key requires recruiter and job and avoids delimiter collisions', () => {
+  assert.throws(() => C.pair({ jobId: 'j' }));
+  assert.notEqual(C.pair({ recruiterId: 'a:b', jobId: 'c' }), C.pair({ recruiterId: 'a', jobId: 'b:c' }));
+  assert.notEqual(C.pair({ recruiterId: 'a', jobId: '1' }), C.pair({ recruiterId: 'a', jobId: '2' }));
+});
+test('AI malformed values and blank greetings fail closed', () => {
+  const good = { score: 88, suitable: true, uncertain: false, reason: '符合', doubts: [], greeting: '您好' };
+  assert.equal(C.analysis(JSON.stringify(good)).score, 88);
+  for (const bad of ['nonsense', '{}', JSON.stringify({ ...good, score: '90' }), JSON.stringify({ ...good, greeting: '' }), JSON.stringify({ ...good, score: 101 })]) assert.throws(() => C.analysis(bad));
+  assert.equal(C.decide({ ...good, uncertain: true }, C.defaults()), 'review');
+  assert.equal(C.decide({ ...good, score: 79 }, C.defaults()), 'rejected');
+});
+test('reply schema requires evidence and rejects invented action names', () => {
+  assert.throws(() => C.reply('{"action":"reply","text":"你好","reason":"","evidence":[]}'));
+  assert.throws(() => C.reply('{"action":"send_file","text":"","reason":"","evidence":[]}'));
+  assert.equal(C.reply('{"action":"handoff","text":"","reason":"需要确认","evidence":[]}').action, 'handoff');
+});
+test('important incoming matters always transfer to human', () => {
+  for (const text of ['明天面试可以吗', '期望薪资多少', '加一下微信', '什么时候到岗', '发验证码']) assert.equal(C.sensitive(text), true);
+  assert.equal(C.sensitive('用过哪些前端框架'), false);
+});
+test('resume requests require affirmative intent and reject negation', () => {
+  for (const text of ['请发一份简历', '方便发一下你的简历吗', '简历发我一下', '发一下简历']) assert.equal(C.wantsResume(text), true, text);
+  for (const text of ['不用发简历', '不需要你的简历', '已经收到简历', '简历很不错', '暂不需要发简历']) assert.equal(C.wantsResume(text), false, text);
+});
+test('API address is normalized and must be HTTPS without embedded credentials', () => {
+  assert.equal(C.endpoint('https://api.deepseek.com'), 'https://api.deepseek.com/chat/completions');
+  assert.equal(C.endpoint('https://dashscope.aliyuncs.com/compatible-mode/v1/'), 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions');
+  assert.equal(C.endpoint('https://example.com/v1/chat/completions'), 'https://example.com/v1/chat/completions');
+  for (const url of ['http://example.com', 'https://key@example.com', 'https://example.com?key=secret', 'https://example.com#x']) assert.throws(() => C.endpoint(url));
+});
+test('export omits API key', () => {
+  const c = { ...C.defaults(), apiKey: 'secret-test-value' };
+  assert.equal(JSON.stringify(C.publicConfig(c)).includes('secret-test-value'), false);
+});
+test('custom endpoint has one completion suffix and network errors give exact-host guidance', () => {
+  const target = C.endpoint('https://maas.qianwenaiapi.com/compatible-mode/v1');
+  assert.equal(target, 'https://maas.qianwenaiapi.com/compatible-mode/v1/chat/completions');
+  const error = C.networkFailure(target, { error: 'not permitted: secret-fake-key' });
+  assert.match(error, /油猴拒绝了跨域访问/); assert.match(error, /@connect maas\.qianwenaiapi\.com/);
+  assert.equal(error.includes('secret-fake-key'), false);
+});
+test('network diagnostics do not confuse missing HTTP response with invalid credentials', () => {
+  assert.match(C.networkFailure('https://example.com', {}), /尚不能判断 Key 或模型/);
+  assert.match(C.networkFailure('https://example.com', { error: 'ERR_NAME_NOT_RESOLVED' }), /域名解析失败/);
+  assert.match(C.httpFailure(401), /认证失败/); assert.match(C.httpFailure(404), /接口路径或模型不存在/);
+});
+test('multi-tab lease elects one deterministic winner and expires stale tabs', () => {
+  const a = { owner: 'a', claimedAt: 1, expires: 100 }, b = { owner: 'b', claimedAt: 1, expires: 100 };
+  assert.equal(C.leaseWinner([b, a], 5), 'a');
+  assert.equal(C.leaseWinner([a, { ...b, expires: 200 }], 100), 'b');
+  assert.equal(C.leaseWinner([a, b], 101), null);
+});
