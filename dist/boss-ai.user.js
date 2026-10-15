@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS AI 求职助手（试运行优先）
 // @namespace    local.boss-ai
-// @version      0.1.12
+// @version      0.1.17
 // @description  AI 职位筛选、受控沟通与北京时间调度；请先校准页面
 // @match        https://www.zhipin.com/*
 // @grant        GM_getValue
@@ -37,10 +37,10 @@
     deepseek: Object.freeze({ baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash' })
   });
   const SCORING = Object.freeze([
-    { key: 'skills', label: '核心技能与工作内容', max: 40 },
-    { key: 'experience', label: '项目经历与可迁移能力', max: 25 },
+    { key: 'skills', label: '核心技能与工作内容', max: 30 },
+    { key: 'experience', label: '项目经历与可迁移能力', max: 20 },
     { key: 'requirements', label: '基本任职条件', max: 20 },
-    { key: 'preferences', label: '求职偏好', max: 5 },
+    { key: 'preferences', label: '求职偏好', max: 20 },
     { key: 'bonus', label: '加分项与优先条件', max: 10 }
   ].map(Object.freeze));
   const scoringPrompt = '采用固定100分制，按以下分项给分：' + SCORING.map(x => `${x.key}（${x.label}）0到${x.max}分`).join('；') + '。' +
@@ -55,7 +55,7 @@
     greetingPrompt: '用自然、简短的中文打招呼，突出真实匹配点，不编造经历，不承诺薪资或面试。',
     threshold: 80, maxContacts: 50, sendIntervalSeconds: 180, aiTimeoutSeconds: 180,
     refreshMinSeconds: 10, refreshMaxSeconds: 60, maxReplies: 5,
-    scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false,
+    scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false, verifyChatWindow: true,
     resumeName: '', internshipOnly: true, requiredCity: '北京', profile: {}
   });
   const fail = message => { throw new Error(message); };
@@ -86,7 +86,7 @@
     for (const key of ['baseUrl', 'model', 'apiKey', 'resume', 'preferences', 'screeningPrompt', 'greetingPrompt', 'resumeName', 'requiredCity']) {
       if (typeof c[key] !== 'string') fail(`配置 ${key} 必须是文字`);
     }
-    for (const key of ['autoSend', 'scheduleEnabled', 'internshipOnly']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
+    for (const key of ['autoSend', 'verifyChatWindow', 'scheduleEnabled', 'internshipOnly']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
     for (const [key, min, max] of [['threshold', 0, 100], ['maxContacts', 1, 500],
       ['sendIntervalSeconds', 1, 86400], ['refreshMinSeconds', 1, 3600],
       ['refreshMaxSeconds', 1, 3600], ['maxReplies', 1, 100], ['aiTimeoutSeconds', 30, 600]]) {
@@ -172,7 +172,13 @@
     if (!Array.isArray(x.greetingEvidence) || !x.greetingEvidence.length || x.greetingEvidence.length > 3 ||
       !x.greetingEvidence.every(e => typeof e === 'string' && e.trim().length >= 4 && e.length <= 200 && (!resume || resume.includes(e.trim())))) fail('AI 招呼缺少可核对的简历原文依据');
     const score = Math.round(Object.values(scoreBreakdown).reduce((sum, value) => sum + value, 0) * 10) / 10;
-    return analysis({ ...x, scoreBreakdown, score, scoringVersion: 1 });
+    return analysis({ ...x, scoreBreakdown, score, scoringVersion: 2, scoreMaxima: Object.fromEntries(SCORING.map(({ key, max }) => [key, max])) });
+  }
+  function hasVisibleScore(entries, jobId) {
+    if (!jobId) return false;
+    const matches = Object.values(entries).filter(entry => !entry.hidden && entry.job?.jobId === jobId);
+    if (matches.some(entry => entry.retryApproved)) return false;
+    return matches.some(entry => Number.isFinite(entry.analysis?.score) && entry.analysis.score >= 0 && entry.analysis.score <= 100);
   }
   function firstContactStatus(history) {
     if (history.some(m => m.role === 'candidate' && typeof m.text === 'string' && m.text.includes(AI_NOTICE))) return 'ai-sent';
@@ -255,7 +261,7 @@
   function leaseWinner(claims, now) {
     return claims.filter(c => c && c.expires > now).sort((a, b) => a.claimedAt - b.claimedAt || a.owner.localeCompare(b.owner))[0]?.owner ?? null;
   }
-  return { AI_NOTICE, aiMessage, anonymousMessage, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, parseJSON, analysis, reply, pair,
+  return { AI_NOTICE, aiMessage, anonymousMessage, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, parseJSON, analysis, reply, pair,
     sensitive, wantsResume, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner };
 });
 
@@ -293,8 +299,9 @@
     blocked: '.geetest_panel, .captcha-box, .verify-wrap, .login-dialog'
   };
   class Adapter {
-    constructor(doc = document, profile = {}, knownJobs = []) {
+    constructor(doc = document, profile = {}, knownJobs = [], options = {}) {
       this.doc = doc; this.p = { ...DEFAULT_PROFILE, ...profile }; this.knownJobs = knownJobs;
+      this.verifyChatWindow = options.verifyChatWindow !== false;
       if (profile.contact === '.op-btn-chat') this.p.contact = DEFAULT_PROFILE.contact;
       // Migrate only shipped defaults; preserve deliberate custom selectors.
       const legacy = { chatHeader: '.chat-info, .chat-header, .conversation-header', messages: '[data-message-id]',
@@ -426,46 +433,48 @@
           const name = this.uniqueText(this.p.chatRecruiterName, header, true), company = this.uniqueText(this.p.chatCompany, header);
           const recruiterId = this.visibleRecruiter(name, company);
           if (jobIds.length > 1) throw new Error('聊天区域包含多个岗位，无法核对当前岗位');
-          if (jobIds.length === 1 && recruiterId) identities.push({ jobId: jobIds[0], recruiterId, recruiterName: name, company, identityType: 'visible-context' });
-          else if (!jobIds.length && recruiterId) {
-            const positions = this.nodes(this.p.chatPosition, header);
+          if (jobIds.length === 1) identities.push({ jobId: jobIds[0], recruiterId, recruiterName: name, company, identityType: 'visible-context' });
+          else if (!jobIds.length) {
+            let positions = this.nodes(this.p.chatPosition, header);
+            if (!positions.length) positions = this.nodes('.chat-position-content', header);
             if (positions.length > 1) throw new Error('聊天区域包含多个岗位卡片，无法核对当前岗位');
             if (positions.length === 1) {
               const title = this.uniqueField(this.p.chatTitle, positions[0]), salary = this.uniqueField(this.p.chatSalary, positions[0], 'salary'), city = this.uniqueField(this.p.chatCity, positions[0], 'city');
-              if (title && salary && city) identities.push({ recruiterId, recruiterName: name, company, title, salary, city, identityType: 'visible-fields' });
+              if (title) identities.push({ recruiterId, recruiterName: name, company, title, salary, city, identityType: 'visible-fields' });
             }
           }
         }
-        const unique = [...new Map(identities.map(job => [JSON.stringify([job.jobId || '', job.recruiterId, job.title || '', job.salary || '', job.city || '']), job])).values()];
+        const unique = [...new Map(identities.map(job => [JSON.stringify([job.jobId || '', job.title || '']), job])).values()];
         if (unique.length > 1) throw new Error('聊天区域身份互相冲突，已停止发送');
-        if (!unique.length) throw new Error('聊天窗口已找到，但招聘者、公司或岗位卡片字段不完整；需要岗位链接，或完整的岗位名称/薪资/城市');
+        if (!unique.length) throw new Error('聊天窗口已找到，但岗位名称字段缺失；需要岗位链接或岗位名称');
         return unique[0];
       }
       const job = { jobId: el.getAttribute(this.p.chatJobAttr), recruiterId: el.getAttribute(this.p.chatRecruiterAttr), identityType: 'platform-id' };
-      root.BossCore.pair(job);
+      if (!job.jobId) throw new Error('聊天页缺少岗位 ID，无法核对岗位');
       return job;
     }
     assertIdentity(job) {
+      if (!this.verifyChatWindow) {
+        // The user explicitly opts out of identity comparison, not UI readiness.
+        if (!this.chatReady()) throw new Error('聊天窗口未展开，不能发送；请先打开会话');
+        this.editor();
+        return;
+      }
       const actual = this.identity();
       root.BossCore.pair(job);
       if (actual.identityType === 'visible-fields') {
-        // No job ID is invented. Match all five independent fields to a detail page
+        // No job ID is invented. Match only the job title to a detail page
         // whose contact button explicitly targeted the expected job ID.
         if (job.contactTargetJobId !== job.jobId) throw new Error('可见字段核对需要详情页沟通按钮绑定本岗位，请重新读取职位');
-        const fields = [['recruiterName', '招聘者', ''], ['company', '公司', ''], ['title', '岗位名称', ''], ['salary', '薪资', 'salary'], ['city', '城市', 'city']];
+        const fields = [['title', '岗位名称', '']];
         for (const [key, label, kind] of fields) {
           const expected = this.normalizeField(job[key], kind);
           if (!expected || expected !== this.normalizeField(actual[key], kind)) throw new Error('当前会话的' + label + '与目标职位不一致或字段缺失，已停止');
         }
-        if (this.knownJobs.some(other => other?.jobId && other.jobId !== job.jobId && fields.every(([key, , kind]) => this.normalizeField(other[key], kind) === this.normalizeField(actual[key], kind)))) {
-          throw new Error('多个已读取岗位的展示信息完全相同，不能唯一核对岗位，需要岗位 ID 或人工处理');
-        }
         return;
       }
-      if (root.BossCore.pair(actual) === root.BossCore.pair(job)) return;
-      if (actual.jobId === job.jobId && actual.identityType === 'visible-context' && job.recruiterName && job.company &&
-        actual.recruiterName === job.recruiterName && actual.company === job.company) return;
-      throw new Error('当前会话与目标岗位/招聘者不一致，已停止');
+      if (actual.jobId === job.jobId) return;
+      throw new Error('当前会话与目标岗位不一致，已停止');
     }
     isSystemNotice(n) {
       // This allowlist identifies the platform's competitor-analysis promotion,
@@ -517,16 +526,39 @@
       matches[0].click();
     }
     editor() { return this.one(this.p.composer); }
+    normalizeEditorText(text) {
+      return String(text ?? '').replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ').trim();
+    }
+    editorText(input = this.editor()) {
+      return this.normalizeEditorText('value' in input ? input.value : (input.innerText ?? input.textContent ?? ''));
+    }
+    editorMatches(text) { return this.editorText() === this.normalizeEditorText(text); }
     fill(text) {
       const input = this.editor();
-      if ((input.value || input.textContent || '').trim()) throw new Error('输入框已有草稿，请人工处理，避免覆盖');
+      if (this.editorText(input)) throw new Error('输入框已有草稿，请人工处理，避免覆盖');
       input.focus();
       if ('value' in input) {
         const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value');
         if (descriptor?.set) descriptor.set.call(input, text); else input.value = text;
-      } else if (input.isContentEditable) input.textContent = text;
+      } else if (input.isContentEditable) {
+        // textContent puts raw newlines in a normal-white-space DIV. Its rendered
+        // innerText can then collapse them, especially the AI disclosure newline.
+        // Use the editing path so BOSS receives input events and real line breaks.
+        const selection = this.doc.getSelection?.(), range = this.doc.createRange?.();
+        let inserted = false;
+        if (selection && range && this.doc.execCommand) {
+          range.selectNodeContents(input); range.collapse(false);
+          selection.removeAllRanges(); selection.addRange(range);
+          inserted = this.doc.execCommand('insertText', false, text);
+        }
+        if (!inserted) {
+          if (this.editorText(input)) throw new Error('编辑器写入结果不明确，保留草稿并取消发送');
+          input.innerText = text;
+        }
+      }
       else throw new Error('不支持的聊天编辑器');
-      input.dispatchEvent(new Event('input', { bubbles: true }));
+      const Input = this.doc.defaultView?.InputEvent;
+      input.dispatchEvent(Input ? new Input('input', { bubbles: true, inputType: 'insertText', data: text }) : new Event('input', { bubbles: true }));
       input.dispatchEvent(new Event('change', { bubbles: true }));
     }
     button(selector, scope) {
@@ -544,7 +576,7 @@
       try { const x = this.inspectJob(); job = { jobIdFound: !!x.jobId, recruiterIdFound: !!x.recruiterId, descriptionLength: x.description.length }; } catch { /* not detail */ }
       try {
         const actual = this.identity(); chatIdentity = actual;
-        identity = actual.identityType === 'visible-fields' ? '招聘者、公司、岗位名称、薪资及城市可读取；发送时需逐项匹配目标职位（页面未提供岗位 ID）' : '岗位及招聘者可核对';
+        identity = actual.identityType === 'visible-fields' ? '岗位名称可读取；发送时仅匹配岗位名称，不核对薪资和城市（页面未提供岗位 ID）' : '岗位 ID 可核对';
       } catch (e) { identity = e.message; }
       const chat = this.nodes(this.p.chatHeader).map(scope => ({
         container: scope.className || scope.tagName || '',
@@ -583,6 +615,7 @@
 
 (function () {
   'use strict';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.17';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -981,7 +1014,12 @@
       if (s.task.refreshWanted) {
         s.task.refreshWanted = false; persist(s); location.reload(); return;
       }
-      const cards = adapter.cards(), card = cards.find(j => !s.task.visited.includes(j.jobId));
+      const cards = adapter.cards(); let skipped = 0;
+      for (const candidate of cards) if (!s.task.visited.includes(candidate.jobId) && C.hasVisibleScore(s.entries, candidate.jobId)) {
+        s.task.visited.push(candidate.jobId); skipped++;
+      }
+      if (skipped) { log(s, `跳过${skipped}个列表中已有评分的职位，不重复读取或调用AI`); persist(s); }
+      const card = cards.find(j => !s.task.visited.includes(j.jobId));
       if (!card) {
         const result = adapter.advance();
         s.task.emptyRounds = (s.task.emptyRounds || 0) + 1;
@@ -1080,7 +1118,7 @@
     workerBusy = true;
     try {
       const sending = ['contact', 'reply', 'resume'].includes(cmd.type), c = workerGuard(cmd, sending);
-      const adapter = new Adapter(document, c.profile, Object.values(state().entries).map(entry => entry.job)), job = cmd.args.job;
+      const adapter = new Adapter(document, c.profile, Object.values(state().entries).map(entry => entry.job), { verifyChatWindow: c.verifyChatWindow }), job = cmd.args.job;
       // Persist BEFORE any side effect. After reload, never repeat an uncertain click.
       if (get('consumed.' + cmd.id)) {
         workerFinish(cmd, { confirmed: false, reason: '发送操作已执行过但确认中断，请人工核对' }); return;
@@ -1159,10 +1197,13 @@
       const before = history.filter(m => m.role === 'candidate' && m.text === text).length;
       sendStage(cmd, 'drafting');
       adapter.fill(text); await sleep(150);
+      // Allow a bounded UI render delay; never rewrite the draft or retry a send.
+      for (let i = 0; i < 5 && !adapter.editorMatches(text); i++) {
+        workerGuard(cmd, true); await sleep(100);
+      }
       workerGuard(cmd, true); adapter.assertIdentity(job);
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id) throw new Error('填写期间会话发生变化，草稿留待人工处理');
-      const editor = adapter.editor();
-      if ((editor.value || editor.innerText || editor.textContent || '').trim() !== text.trim()) throw new Error('输入框内容与拟发送消息不一致，取消发送');
+      if (!adapter.editorMatches(text)) throw new Error('输入框内容与拟发送消息不一致，取消发送（已等待编辑器同步，草稿保留；请核对换行或网页是否改写内容）');
       const send = adapter.button(adapter.p.send);
       sendStage(cmd, 'clicked'); put('consumed.' + cmd.id, true); workerGuard(cmd, true); send.click();
       const confirmed = await verifyReceipt(adapter, cmd, before, text);
@@ -1186,7 +1227,7 @@
       header{padding:16px 18px;background:#eaf6f4;display:flex;justify-content:space-between;align-items:center}h2{font-size:17px;margin:0}main{padding:16px}label{display:block;margin:9px 0 4px;font-size:13px}
       input:not([type=checkbox]),textarea,select{width:100%;border:1px solid #bdcdd4;border-radius:6px;padding:8px;color:#172b3a;background:#fff}textarea{min-height:74px;resize:vertical}.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}.actions{display:flex;flex-wrap:wrap;gap:7px;margin:12px 0}details{border-top:1px solid #e1e9eb;margin-top:14px;padding-top:10px}summary{cursor:pointer;font-weight:600}.status{white-space:pre-wrap;padding:10px;background:#f2f6f8;border-radius:7px;font-size:12px}.entry{border-bottom:1px solid #dfe7e9;padding:10px 0}.entry p{margin:4px 0;white-space:pre-wrap;overflow-wrap:anywhere}a{color:#087e77}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px} .pill{border-radius:10px;background:#eaf6f4;padding:2px 6px;font-size:12px}
       </style><button class="launch" id="launch">💼 AI 求职助手</button>
-      <section class="panel" id="panel"><header><h2>AI 求职助手 <span class="pill">试运行优先</span></h2><button id="close">收起</button></header><main>
+      <section class="panel" id="panel"><header><h2>AI 求职助手 v${VERSION} <span class="pill">试运行优先</span></h2><button id="close">收起</button></header><main>
       <div id="status" class="status"></div><div class="actions"><button class="primary" id="start">开始新任务</button><button class="danger" id="stop">立即停止</button><button id="clearActivity">清空日志与待处理</button></div>
       <p class="muted">清空会停止当前任务、取消待处理发送并清空列表；保留内部去重记录、计数及配置，避免重复联系。</p>
       <p class="muted">仅使用本脚本联系的会话。Key 保存在油猴本地存储，不会随配置导出。后台冻结可能延迟启动；到停止时间不补发。</p>
@@ -1209,9 +1250,11 @@
       <div class="row"><div><label>AI 匹配阈值 / 100</label><input type="number" name="threshold" min="0" max="100"></div><div><label>每个会话每任务最多自动回复</label><input type="number" name="maxReplies" min="1" max="100"></div></div></details>
       <p class="muted">符合北京实习条件且分数达到阈值，即可进入发送队列。AI 的“适合/不确定”标记和疑点仅供参考，不再拦截；实际发送仍需授权、对象核对，并遵守间隔和额度。</p>
       <details><summary>AI 提示词与附件</summary><p class="muted">评分标准：${C.SCORING.map(x => x.label + ' ' + x.max + '分').join('；')}。AI 给各项分数，代码加总。“优先/加分项”仅影响最后10分，不重复扣分；岗位没有加分条款时此项按10分中性计入。</p><label>筛选要求</label><textarea name="screeningPrompt"></textarea><label>招呼语要求</label><textarea name="greetingPrompt"></textarea><p class="muted">首条招呼和所有 AI 文字回复末尾强制注明“（本消息由 AI 发送）”，不能通过提示词关闭。</p><label>BOSS 附件简历完整名称</label><input name="resumeName" placeholder="必须与 BOSS 上显示的名称完全一致"></details>
-      <details><summary>页面诊断与高级适配</summary><p class="muted">发送前核对目标岗位与招聘者。聊天页无岗位链接时，需招聘者、公司、岗位名称、薪资、城市全部匹配，且详情页沟通按钮绑定该岗位。“竞争者PK情况”系统卡片不计入聊天消息；其它已有消息仍阻止追加首条招呼。附件选择仍需校准，不要凭猜测开启 verified 标记。</p><button type="button" id="diagnostic">只读诊断当前页面</button><button type="button" id="defaultProfile">载入默认适配模板</button><pre id="diagnosticOutput"></pre><label>页面适配 JSON（仅 CSS 选择器和流程验证标记）</label><textarea name="profile" rows="8" spellcheck="false"></textarea></details>
+      <details><summary>页面诊断与高级适配</summary><p class="muted">开启聊天窗口核对时，有岗位 ID 则核对 ID；没有 ID 时仅核对岗位名称，不核对薪资、城市、招聘者或公司。关闭核对时跳过这项比对，但仍要求聊天窗口和输入框可用。“竞争者PK情况”系统卡片不计入聊天消息；其它已有消息仍阻止追加首条招呼。附件选择仍需校准，不要凭猜测开启 verified 标记。</p><button type="button" id="diagnostic">只读诊断当前页面</button><button type="button" id="defaultProfile">载入默认适配模板</button><pre id="diagnosticOutput"></pre><label>页面适配 JSON（仅 CSS 选择器和流程验证标记）</label><textarea name="profile" rows="8" spellcheck="false"></textarea></details>
       <label class="warn"><input type="checkbox" name="autoSend"> 允许 AI 自动发送（默认关闭）</label>
-      <p class="muted">关闭：只读取和分析，不向招聘者发送。取消勾选立即生效，取消排队发送；已发内容不能撤回。开启：先停止任务，勾选并保存配置；发送前仍核对岗位、招聘者和聊天对象。附件还需单独校准。权限适用于首聊、回复和简历。</p>
+      <label class="warn"><input type="checkbox" name="verifyChatWindow"> 核对聊天窗口（默认开启）</label>
+      <p class="warn">关闭后不比对当前聊天的岗位 ID 或名称，直接使用已打开的聊天窗口，可能发错对象。仍需会话已展开、输入框可用，并保留聊天历史去重、内容校验、发送间隔和额度。先停止任务，调整后保存配置。</p>
+      <p class="muted">关闭：只读取和分析，不向招聘者发送。取消勾选立即生效，取消排队发送；已发内容不能撤回。开启：先停止任务，勾选并保存配置；发送前是否比对聊天岗位由“核对聊天窗口”选项决定。附件还需单独校准。权限适用于首聊、回复和简历。</p>
       <p class="muted">启动即将简历、偏好、必要职位/聊天文字发给所配置 AI 接口。自动化可能受平台限制；不绕过验证码。首次上线请保持试运行。</p>
       <div class="actions"><button type="submit" class="primary">保存配置</button><button type="button" id="export">导出配置（不含 Key）</button><button type="button" id="import">导入配置</button><input id="importFile" type="file" accept="application/json" hidden></div></form>
       <details open><summary>职位、招呼与待处理</summary><div id="entries"></div></details><details><summary>运行记录</summary><div id="logs"></div></details>
@@ -1247,7 +1290,7 @@
     form.onsubmit = action(() => {
       if (state().task?.status === 'running' || busy) throw new Error('先停止任务，再保存配置');
       const c = read();
-      put('config', c); notify('配置已保存，仅存于本机油猴存储');
+      put('config', c); notify(c.verifyChatWindow ? '配置已保存，聊天窗口核对已开启' : '配置已保存，聊天窗口核对已关闭：将使用当前打开的会话，可能发错对象');
     });
     form.elements.provider.onchange = () => {
       const preset = C.PROVIDERS[form.elements.provider.value];
@@ -1310,14 +1353,15 @@
     const execution = !location.pathname.includes('/web/geek/jobs') ? '请在职位搜索页启动' :
       starting ? '正在申请本页执行' : t?.status === 'running' ? owned() ? '本页执行中' : '其他标签页执行中' : '就绪，点击开始将由本页执行';
     const waiting = activeRequest ? `\n${activeRequest.purpose}请求中：已等待${Math.max(0, Math.floor((Date.now() - activeRequest.startedAt) / 1000))}秒 / 上限${activeRequest.timeoutSeconds}秒，正文约${activeRequest.inputChars}字符` : '';
-    q('status').textContent = `${execution} · ${c.autoSend ? '自动发送模式' : '试运行，不发送'}\n任务：${t?.status || '未启动'} · 首聊预约 ${t?.contacts || 0}/${c.maxContacts}（含待核实）\n下次刷新/扫描：${t?.exhausted ? '已遍历完成' : fmt(t?.nextScanAt)}\n停止：${fmt(t?.endAt)}\n${logMessage}${waiting}`;
+    q('status').textContent = `${execution} · ${c.autoSend ? '自动发送模式' : '试运行，不发送'} · ${c.verifyChatWindow ? '核对聊天窗口' : '不核对聊天窗口（可能发错对象）'}\n任务：${t?.status || '未启动'} · 首聊预约 ${t?.contacts || 0}/${c.maxContacts}（含待核实）\n下次刷新/扫描：${t?.exhausted ? '已遍历完成' : fmt(t?.nextScanAt)}\n停止：${fmt(t?.endAt)}\n${logMessage}${waiting}`;
     const entries = q('entries'); entries.replaceChildren();
     const labels = { eligible: '待发送/试运行预览', review: '待人工确认', rejected: '不匹配', existing: '已有沟通，跳过', contacted: '已联系', uncertain: '发送待核实', retryable: '发送前中断，待重新评估' };
     for (const entry of Object.values(s.entries).filter(entry => !entry.hidden).slice(-60).reverse()) {
       const el = document.createElement('div'); el.className = 'entry';
+      const scoreMaxima = entry.analysis?.scoreMaxima || (entry.analysis?.scoringVersion === 1 ? { skills: 40, experience: 25, requirements: 20, preferences: 5, bonus: 10 } : Object.fromEntries(C.SCORING.map(x => [x.key, x.max])));
       const a = document.createElement('a'); a.textContent = entry.job.title || entry.job.jobId; a.href = new Adapter().safeUrl(entry.job.url).href; a.target = '_blank'; a.rel = 'noopener noreferrer'; el.append(a);
       for (const text of [`${labels[entry.status] || entry.status}${entry.handoff ? ' · 自动回复已暂停' : ''} ${entry.analysis ? entry.analysis.score + '分' : ''}`,
-        entry.analysis ? entry.analysis.scoringVersion === 1 ? '评分构成：' + C.SCORING.map(x => x.label + ' ' + entry.analysis.scoreBreakdown[x.key] + '/' + x.max).join('；') + (entry.analysis.hasBonusRequirements ? '' : '（岗位无加分条款，末项中性计分）') : '评分方式：旧版综合评分，未应用分项权重' : '',
+        entry.analysis ? entry.analysis.scoreBreakdown && [1, 2].includes(entry.analysis.scoringVersion) ? '评分构成' + (entry.analysis.scoringVersion === 1 ? '（旧权重）' : '') + '：' + C.SCORING.map(x => x.label + ' ' + entry.analysis.scoreBreakdown[x.key] + '/' + scoreMaxima[x.key]).join('；') + (entry.analysis.hasBonusRequirements ? '' : '（岗位无加分条款，末项中性计分）') : '评分方式：旧版综合评分，未应用分项权重' : '',
         entry.analysis?.reason, entry.analysis?.doubts?.join('；'), entry.note,
         entry.pendingReply ? '排队中：' + (entry.pendingReply.kind === 'resume' ? '发送指定附件简历' : C.anonymousMessage(entry.pendingReply.payload.text, c.resume, entry.job)) : '',
         entry.analysis?.greeting ? '招呼预览：' + C.anonymousMessage(entry.analysis.greeting, c.resume, entry.job) : '']) {
@@ -1339,7 +1383,7 @@
     module.exports = { renewLease, start, requestStart, stop, pump, analyze, testConnection, approveContactRetry, settle, chatDecision, requestAI, command, closeManagedWorker, disableAutoSend, requestClearActivity, completeClearActivity, quarantinePending }; return;
   }
   if (workerId) {
-    const banner = document.createElement('div'); banner.textContent = 'AI 求职工作标签页 · 请勿手动切换会话或输入消息 · 停止请在主搜索页操作';
+    const banner = document.createElement('div'); banner.textContent = `AI 求职工作标签页 v${VERSION} · 请勿手动切换会话或输入消息 · 停止请在主搜索页操作`;
     banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:8px;background:#fff2cf;color:#593b00;z-index:2147483647;font:14px system-ui';
     document.documentElement.append(banner);
     GM_getTab(tab => {

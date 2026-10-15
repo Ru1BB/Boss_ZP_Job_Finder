@@ -32,8 +32,9 @@
     blocked: '.geetest_panel, .captcha-box, .verify-wrap, .login-dialog'
   };
   class Adapter {
-    constructor(doc = document, profile = {}, knownJobs = []) {
+    constructor(doc = document, profile = {}, knownJobs = [], options = {}) {
       this.doc = doc; this.p = { ...DEFAULT_PROFILE, ...profile }; this.knownJobs = knownJobs;
+      this.verifyChatWindow = options.verifyChatWindow !== false;
       if (profile.contact === '.op-btn-chat') this.p.contact = DEFAULT_PROFILE.contact;
       // Migrate only shipped defaults; preserve deliberate custom selectors.
       const legacy = { chatHeader: '.chat-info, .chat-header, .conversation-header', messages: '[data-message-id]',
@@ -165,46 +166,48 @@
           const name = this.uniqueText(this.p.chatRecruiterName, header, true), company = this.uniqueText(this.p.chatCompany, header);
           const recruiterId = this.visibleRecruiter(name, company);
           if (jobIds.length > 1) throw new Error('聊天区域包含多个岗位，无法核对当前岗位');
-          if (jobIds.length === 1 && recruiterId) identities.push({ jobId: jobIds[0], recruiterId, recruiterName: name, company, identityType: 'visible-context' });
-          else if (!jobIds.length && recruiterId) {
-            const positions = this.nodes(this.p.chatPosition, header);
+          if (jobIds.length === 1) identities.push({ jobId: jobIds[0], recruiterId, recruiterName: name, company, identityType: 'visible-context' });
+          else if (!jobIds.length) {
+            let positions = this.nodes(this.p.chatPosition, header);
+            if (!positions.length) positions = this.nodes('.chat-position-content', header);
             if (positions.length > 1) throw new Error('聊天区域包含多个岗位卡片，无法核对当前岗位');
             if (positions.length === 1) {
               const title = this.uniqueField(this.p.chatTitle, positions[0]), salary = this.uniqueField(this.p.chatSalary, positions[0], 'salary'), city = this.uniqueField(this.p.chatCity, positions[0], 'city');
-              if (title && salary && city) identities.push({ recruiterId, recruiterName: name, company, title, salary, city, identityType: 'visible-fields' });
+              if (title) identities.push({ recruiterId, recruiterName: name, company, title, salary, city, identityType: 'visible-fields' });
             }
           }
         }
-        const unique = [...new Map(identities.map(job => [JSON.stringify([job.jobId || '', job.recruiterId, job.title || '', job.salary || '', job.city || '']), job])).values()];
+        const unique = [...new Map(identities.map(job => [JSON.stringify([job.jobId || '', job.title || '']), job])).values()];
         if (unique.length > 1) throw new Error('聊天区域身份互相冲突，已停止发送');
-        if (!unique.length) throw new Error('聊天窗口已找到，但招聘者、公司或岗位卡片字段不完整；需要岗位链接，或完整的岗位名称/薪资/城市');
+        if (!unique.length) throw new Error('聊天窗口已找到，但岗位名称字段缺失；需要岗位链接或岗位名称');
         return unique[0];
       }
       const job = { jobId: el.getAttribute(this.p.chatJobAttr), recruiterId: el.getAttribute(this.p.chatRecruiterAttr), identityType: 'platform-id' };
-      root.BossCore.pair(job);
+      if (!job.jobId) throw new Error('聊天页缺少岗位 ID，无法核对岗位');
       return job;
     }
     assertIdentity(job) {
+      if (!this.verifyChatWindow) {
+        // The user explicitly opts out of identity comparison, not UI readiness.
+        if (!this.chatReady()) throw new Error('聊天窗口未展开，不能发送；请先打开会话');
+        this.editor();
+        return;
+      }
       const actual = this.identity();
       root.BossCore.pair(job);
       if (actual.identityType === 'visible-fields') {
-        // No job ID is invented. Match all five independent fields to a detail page
+        // No job ID is invented. Match only the job title to a detail page
         // whose contact button explicitly targeted the expected job ID.
         if (job.contactTargetJobId !== job.jobId) throw new Error('可见字段核对需要详情页沟通按钮绑定本岗位，请重新读取职位');
-        const fields = [['recruiterName', '招聘者', ''], ['company', '公司', ''], ['title', '岗位名称', ''], ['salary', '薪资', 'salary'], ['city', '城市', 'city']];
+        const fields = [['title', '岗位名称', '']];
         for (const [key, label, kind] of fields) {
           const expected = this.normalizeField(job[key], kind);
           if (!expected || expected !== this.normalizeField(actual[key], kind)) throw new Error('当前会话的' + label + '与目标职位不一致或字段缺失，已停止');
         }
-        if (this.knownJobs.some(other => other?.jobId && other.jobId !== job.jobId && fields.every(([key, , kind]) => this.normalizeField(other[key], kind) === this.normalizeField(actual[key], kind)))) {
-          throw new Error('多个已读取岗位的展示信息完全相同，不能唯一核对岗位，需要岗位 ID 或人工处理');
-        }
         return;
       }
-      if (root.BossCore.pair(actual) === root.BossCore.pair(job)) return;
-      if (actual.jobId === job.jobId && actual.identityType === 'visible-context' && job.recruiterName && job.company &&
-        actual.recruiterName === job.recruiterName && actual.company === job.company) return;
-      throw new Error('当前会话与目标岗位/招聘者不一致，已停止');
+      if (actual.jobId === job.jobId) return;
+      throw new Error('当前会话与目标岗位不一致，已停止');
     }
     isSystemNotice(n) {
       // This allowlist identifies the platform's competitor-analysis promotion,
@@ -256,16 +259,39 @@
       matches[0].click();
     }
     editor() { return this.one(this.p.composer); }
+    normalizeEditorText(text) {
+      return String(text ?? '').replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ').trim();
+    }
+    editorText(input = this.editor()) {
+      return this.normalizeEditorText('value' in input ? input.value : (input.innerText ?? input.textContent ?? ''));
+    }
+    editorMatches(text) { return this.editorText() === this.normalizeEditorText(text); }
     fill(text) {
       const input = this.editor();
-      if ((input.value || input.textContent || '').trim()) throw new Error('输入框已有草稿，请人工处理，避免覆盖');
+      if (this.editorText(input)) throw new Error('输入框已有草稿，请人工处理，避免覆盖');
       input.focus();
       if ('value' in input) {
         const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value');
         if (descriptor?.set) descriptor.set.call(input, text); else input.value = text;
-      } else if (input.isContentEditable) input.textContent = text;
+      } else if (input.isContentEditable) {
+        // textContent puts raw newlines in a normal-white-space DIV. Its rendered
+        // innerText can then collapse them, especially the AI disclosure newline.
+        // Use the editing path so BOSS receives input events and real line breaks.
+        const selection = this.doc.getSelection?.(), range = this.doc.createRange?.();
+        let inserted = false;
+        if (selection && range && this.doc.execCommand) {
+          range.selectNodeContents(input); range.collapse(false);
+          selection.removeAllRanges(); selection.addRange(range);
+          inserted = this.doc.execCommand('insertText', false, text);
+        }
+        if (!inserted) {
+          if (this.editorText(input)) throw new Error('编辑器写入结果不明确，保留草稿并取消发送');
+          input.innerText = text;
+        }
+      }
       else throw new Error('不支持的聊天编辑器');
-      input.dispatchEvent(new Event('input', { bubbles: true }));
+      const Input = this.doc.defaultView?.InputEvent;
+      input.dispatchEvent(Input ? new Input('input', { bubbles: true, inputType: 'insertText', data: text }) : new Event('input', { bubbles: true }));
       input.dispatchEvent(new Event('change', { bubbles: true }));
     }
     button(selector, scope) {
@@ -283,7 +309,7 @@
       try { const x = this.inspectJob(); job = { jobIdFound: !!x.jobId, recruiterIdFound: !!x.recruiterId, descriptionLength: x.description.length }; } catch { /* not detail */ }
       try {
         const actual = this.identity(); chatIdentity = actual;
-        identity = actual.identityType === 'visible-fields' ? '招聘者、公司、岗位名称、薪资及城市可读取；发送时需逐项匹配目标职位（页面未提供岗位 ID）' : '岗位及招聘者可核对';
+        identity = actual.identityType === 'visible-fields' ? '岗位名称可读取；发送时仅匹配岗位名称，不核对薪资和城市（页面未提供岗位 ID）' : '岗位 ID 可核对';
       } catch (e) { identity = e.message; }
       const chat = this.nodes(this.p.chatHeader).map(scope => ({
         container: scope.className || scope.tagName || '',

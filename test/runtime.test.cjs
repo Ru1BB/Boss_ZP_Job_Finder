@@ -91,7 +91,7 @@ test('job analysis sends the weighted optional-condition rule and uses the compu
     assert.ok(system.includes('合计最多10分')); assert.ok(system.includes('scoreBreakdown'));
     assert.equal(JSON.parse(request.messages[1].content).job.jobId, 'job1');
     queueMicrotask(() => args.onload({ status: 200, responseText: JSON.stringify({ choices: [{ message: { content: JSON.stringify({ score: 12,
-      scoreBreakdown: { skills: 36, experience: 22, requirements: 18, preferences: 4, bonus: 0 }, hasBonusRequirements: true,
+      scoreBreakdown: { skills: 27, experience: 17, requirements: 18, preferences: 18, bonus: 0 }, hasBonusRequirements: true,
       suitable: false, uncertain: true, reason: '主要条件匹配，缺少的仅为加分经历', doubts: ['加分经历未证实'], greeting: '您好，我开发过前端项目，对该岗位感兴趣', greetingEvidence: ['开发过前端项目'] }) } }] }) }));
     return { abort() {} };
   };
@@ -324,6 +324,35 @@ test('clear during a pending start prevents that start from reviving the task', 
   assert.equal(r.store.get('bossai.v1.clearActivityRequest'), null);
   await assert.rejects(pending, /清空操作取消/);
   assert.notEqual(r.state().task?.status, 'running');
+});
+test('a scored visible job is skipped across new tasks without opening a page or calling AI', async () => {
+  const r = runtime(); r.api.start(); const s = r.state();
+  s.entries.known = { key: 'known', job: { jobId: 'job1' }, analysis: { score: 80 }, status: 'review' };
+  r.api.stop('停止', true); r.api.start(); let opened = 0, called = 0;
+  r.context.BossAdapter.Adapter.prototype.cards = () => [{ jobId: 'job1', url: 'https://www.zhipin.com/job_detail/job1.html' }];
+  r.context.BossAdapter.Adapter.prototype.advance = () => 'end';
+  r.context.GM_openInTab = () => { opened++; throw new Error('不应读页'); };
+  r.context.GM_xmlhttpRequest = () => { called++; throw new Error('不应调用AI'); };
+  await r.api.pump();
+  assert.equal(opened, 0); assert.equal(called, 0); assert.ok(r.state().task.visited.includes('job1'));
+  assert.ok(r.state().logs.some(item => item.message.includes('已有评分')));
+});
+test('explicitly approved retries are freshly inspected and scored despite a previous visible score', async () => {
+  const r = runtime(); r.api.start(); const job = { jobId: 'job1', recruiterId: 'boss1', contactTargetJobId: 'job1',
+    title: '开发实习', city: '北京', employmentType: '实习', description: '完整的测试职位描述', alreadyContacted: true };
+  const key = C.pair(job); r.state().entries[key] = { key, job, analysis: { score: 66 }, retryApproved: true, status: 'review' };
+  r.context.BossAdapter.Adapter.prototype.cards = () => [{ jobId: 'job1', url: 'https://www.zhipin.com/job_detail/job1.html' }];
+  let opened = 0, called = 0;
+  r.context.GM_getTabs = callback => callback({});
+  r.context.GM_openInTab = () => { opened++; const cmd = r.store.get('bossai.v1.command');
+    r.store.set('bossai.v1.result.' + cmd.id, { ok: true, data: job }); return { closed: false, close() { this.closed = true; } };
+  };
+  r.context.GM_xmlhttpRequest = args => { called++; queueMicrotask(() => args.onload({ status: 200, responseText: JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+    scoreBreakdown: { skills: 27, experience: 17, requirements: 18, preferences: 18, bonus: 0 }, hasBonusRequirements: true,
+    suitable: true, uncertain: false, reason: '匹配', doubts: [], greeting: '您好，我开发过前端项目，期待进一步沟通', greetingEvidence: ['开发过前端项目'] }) } }] }) })); return { abort() {} }; };
+  await r.api.pump();
+  assert.equal(opened, 1); assert.equal(called, 1); assert.equal(r.state().entries[key].analysis.score, 80);
+  assert.equal(r.state().entries[key].analysis.scoringVersion, 2);
 });
 
 test('interruption distinguishes proven pre-click stages from clicked or legacy unknown sends', () => {

@@ -11,10 +11,10 @@
     deepseek: Object.freeze({ baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash' })
   });
   const SCORING = Object.freeze([
-    { key: 'skills', label: '核心技能与工作内容', max: 40 },
-    { key: 'experience', label: '项目经历与可迁移能力', max: 25 },
+    { key: 'skills', label: '核心技能与工作内容', max: 30 },
+    { key: 'experience', label: '项目经历与可迁移能力', max: 20 },
     { key: 'requirements', label: '基本任职条件', max: 20 },
-    { key: 'preferences', label: '求职偏好', max: 5 },
+    { key: 'preferences', label: '求职偏好', max: 20 },
     { key: 'bonus', label: '加分项与优先条件', max: 10 }
   ].map(Object.freeze));
   const scoringPrompt = '采用固定100分制，按以下分项给分：' + SCORING.map(x => `${x.key}（${x.label}）0到${x.max}分`).join('；') + '。' +
@@ -29,7 +29,7 @@
     greetingPrompt: '用自然、简短的中文打招呼，突出真实匹配点，不编造经历，不承诺薪资或面试。',
     threshold: 80, maxContacts: 50, sendIntervalSeconds: 180, aiTimeoutSeconds: 180,
     refreshMinSeconds: 10, refreshMaxSeconds: 60, maxReplies: 5,
-    scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false,
+    scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false, verifyChatWindow: true,
     resumeName: '', internshipOnly: true, requiredCity: '北京', profile: {}
   });
   const fail = message => { throw new Error(message); };
@@ -60,7 +60,7 @@
     for (const key of ['baseUrl', 'model', 'apiKey', 'resume', 'preferences', 'screeningPrompt', 'greetingPrompt', 'resumeName', 'requiredCity']) {
       if (typeof c[key] !== 'string') fail(`配置 ${key} 必须是文字`);
     }
-    for (const key of ['autoSend', 'scheduleEnabled', 'internshipOnly']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
+    for (const key of ['autoSend', 'verifyChatWindow', 'scheduleEnabled', 'internshipOnly']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
     for (const [key, min, max] of [['threshold', 0, 100], ['maxContacts', 1, 500],
       ['sendIntervalSeconds', 1, 86400], ['refreshMinSeconds', 1, 3600],
       ['refreshMaxSeconds', 1, 3600], ['maxReplies', 1, 100], ['aiTimeoutSeconds', 30, 600]]) {
@@ -146,7 +146,13 @@
     if (!Array.isArray(x.greetingEvidence) || !x.greetingEvidence.length || x.greetingEvidence.length > 3 ||
       !x.greetingEvidence.every(e => typeof e === 'string' && e.trim().length >= 4 && e.length <= 200 && (!resume || resume.includes(e.trim())))) fail('AI 招呼缺少可核对的简历原文依据');
     const score = Math.round(Object.values(scoreBreakdown).reduce((sum, value) => sum + value, 0) * 10) / 10;
-    return analysis({ ...x, scoreBreakdown, score, scoringVersion: 1 });
+    return analysis({ ...x, scoreBreakdown, score, scoringVersion: 2, scoreMaxima: Object.fromEntries(SCORING.map(({ key, max }) => [key, max])) });
+  }
+  function hasVisibleScore(entries, jobId) {
+    if (!jobId) return false;
+    const matches = Object.values(entries).filter(entry => !entry.hidden && entry.job?.jobId === jobId);
+    if (matches.some(entry => entry.retryApproved)) return false;
+    return matches.some(entry => Number.isFinite(entry.analysis?.score) && entry.analysis.score >= 0 && entry.analysis.score <= 100);
   }
   function firstContactStatus(history) {
     if (history.some(m => m.role === 'candidate' && typeof m.text === 'string' && m.text.includes(AI_NOTICE))) return 'ai-sent';
@@ -229,6 +235,6 @@
   function leaseWinner(claims, now) {
     return claims.filter(c => c && c.expires > now).sort((a, b) => a.claimedAt - b.claimedAt || a.owner.localeCompare(b.owner))[0]?.owner ?? null;
   }
-  return { AI_NOTICE, aiMessage, anonymousMessage, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, parseJSON, analysis, reply, pair,
+  return { AI_NOTICE, aiMessage, anonymousMessage, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, parseJSON, analysis, reply, pair,
     sensitive, wantsResume, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner };
 });

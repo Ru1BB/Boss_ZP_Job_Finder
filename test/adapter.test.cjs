@@ -3,20 +3,20 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
 const C = require('../src/core.js');
-const context = { BossCore: C, URL };
+const context = { BossCore: C, URL, Event: class { constructor(type) { this.type = type; } } };
 vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname, '../src/adapter.js'), 'utf8'), context);
 const { Adapter, DEFAULT_PROFILE: P } = context.BossAdapter;
 function element(attrs = {}, text = '', selectors = {}) {
   return { selectors, innerText: text, textContent: text, childNodes: [{ nodeType: 3, textContent: text }],
     getAttribute(name) { return attrs[name] || null; }, href: attrs.href };
 }
-function adapter(selectors = {}, profile = {}) {
+function adapter(selectors = {}, profile = {}, options = {}) {
   const doc = { selectors, location: { href: 'https://www.zhipin.com/job_detail/job1.html', pathname: '/job_detail/job1.html' } };
   class DOMAdapter extends Adapter {
     nodes(selector, scope = this.doc) { return scope.selectors?.[selector] || []; }
     health() {}
   }
-  return new DOMAdapter(doc, profile);
+  return new DOMAdapter(doc, profile, [], options);
 }
 const attrSelector = ['data-boss-id', 'data-bossid', 'data-boss-uid', 'data-recruiter-id', 'data-encrypt-boss-id'].map(a => '[' + a + ']').join(',');
 test('recruiter IDs can be read from alternate scoped data attributes', () => {
@@ -47,14 +47,16 @@ test('observed BOSS detail structure binds the communication button to the curre
   const job = a.inspectJob(); assert.equal(job.jobId, 'job1'); assert.equal(job.contactTargetJobId, 'job1');
   assert.equal(job.identityType, 'visible-context'); assert.equal(JSON.stringify(job.identityDiagnostic).includes('not-an-identity'), false);
 });
-test('visible chat identity requires the exact job link, company and recruiter', () => {
+test('visible chat identity requires the exact job link without recruiter or company matching', () => {
   const header = element({}, '', { 'a[href*="/job_detail/"]': [element({ href: 'https://www.zhipin.com/job_detail/job1.html' })],
     [P.chatRecruiterName]: [element({}, '测试招聘者')], [P.chatCompany]: [element({}, '示例公司')] });
   const a = adapter({ [P.chatHeader]: [header] });
   const expected = { jobId: 'job1', recruiterId: 'platform-123', recruiterName: '测试招聘者', company: '示例公司' };
   assert.doesNotThrow(() => a.assertIdentity(expected));
   assert.throws(() => a.assertIdentity({ ...expected, jobId: 'job2' }));
-  assert.throws(() => a.assertIdentity({ ...expected, company: '其他公司' }));
+  assert.doesNotThrow(() => a.assertIdentity({ ...expected, company: '其他公司', recruiterName: '' }));
+  header.selectors[P.chatRecruiterName] = []; header.selectors[P.chatCompany] = [];
+  assert.doesNotThrow(() => a.assertIdentity(expected));
   header.selectors['a[href*="/job_detail/"]'] = [];
   assert.throws(() => a.assertIdentity(expected));
 });
@@ -118,7 +120,7 @@ function positionChat(overrides = {}) {
   const job = { jobId: 'job1', contactTargetJobId: 'job1', recruiterId: 'expected-platform-id', ...fields };
   return { a: adapter({ [P.chatHeader]: [header] }), header, card, job };
 }
-test('a DIV position card matches all five fields without pretending it supplies a job ID', () => {
+test('a DIV position card matches only the job title without pretending it supplies a job ID', () => {
   const { a, job } = positionChat();
   const actual = a.identity(); assert.equal(actual.identityType, 'visible-fields'); assert.equal(actual.jobId, undefined);
   assert.equal(actual.title, 'AI 应用开发·实习生'); assert.doesNotThrow(() => a.assertIdentity(job));
@@ -135,23 +137,39 @@ test('job links in historical messages cannot masquerade as the active job', () 
 });
 test('each mismatching or missing target field blocks a linkless position card', () => {
   const { a, job } = positionChat();
-  for (const field of ['recruiterName', 'company', 'title', 'salary', 'city']) {
+  for (const field of ['title']) {
     assert.throws(() => a.assertIdentity({ ...job, [field]: '其他字段' }), /不一致/);
     assert.throws(() => a.assertIdentity({ ...job, [field]: '' }), /字段缺失/);
   }
   assert.throws(() => a.assertIdentity({ ...job, contactTargetJobId: '' }), /绑定本岗位/);
   assert.throws(() => a.assertIdentity({ ...job, contactTargetJobId: 'other-job' }), /绑定本岗位/);
 });
-test('known jobs with identical visible fields and different job IDs require stronger identity', () => {
+
+test('missing or different recruiter and company fields do not block a matching position card', () => {
+  const { a, header, job } = positionChat();
+  header.selectors[P.chatRecruiterName] = []; header.selectors[P.chatCompany] = [];
+  assert.doesNotThrow(() => a.assertIdentity(job));
+  assert.doesNotThrow(() => a.assertIdentity({ ...job, recruiterName: '其他招聘者', company: '' }));
+  a.knownJobs = [{ ...job, jobId: 'another-job', company: '另一公司', recruiterName: '其他招聘者' }];
+  assert.doesNotThrow(() => a.assertIdentity(job));
+});
+
+test('platform job ID matching does not require a readable recruiter ID', () => {
+  const a = adapter({ [P.chatIdentity]: [element({ [P.chatJobAttr]: 'job1' })] });
+  const job = { jobId: 'job1', recruiterId: 'stored-recruiter' };
+  assert.doesNotThrow(() => a.assertIdentity(job));
+  assert.throws(() => a.assertIdentity({ ...job, jobId: 'job2' }), /不一致/);
+});
+test('same-title known jobs do not veto the requested title-only matching', () => {
   const { a, job } = positionChat();
   a.knownJobs = [{ ...job, jobId: 'other-job' }];
-  assert.throws(() => a.assertIdentity(job), /展示信息完全相同/);
+  assert.doesNotThrow(() => a.assertIdentity(job));
   a.knownJobs = [{ ...job, jobId: 'other-job', title: '另一个实习岗位' }, job];
   assert.doesNotThrow(() => a.assertIdentity(job));
 });
 test('incomplete position cards and multiple cards do not authorize sending', () => {
-  for (const field of ['title', 'salary', 'city']) {
-    assert.throws(() => positionChat({ [field]: '' }).a.identity(), /字段不完整/);
+  for (const field of ['title']) {
+    assert.throws(() => positionChat({ [field]: '' }).a.identity(), /岗位名称字段缺失/);
   }
   const { a, header, card } = positionChat(); header.selectors[P.chatPosition].push(card);
   assert.throws(() => a.identity(), /多个岗位卡片/);
@@ -159,9 +177,9 @@ test('incomplete position cards and multiple cards do not authorize sending', ()
 test('format normalization is limited to spacing, salary dash and city suffix', () => {
   const { a, job } = positionChat({ salary: '200 – 300 元/天', city: '北京市' });
   assert.doesNotThrow(() => a.assertIdentity({ ...job, salary: '200-300元/天', city: '北京' }));
-  assert.throws(() => a.assertIdentity({ ...job, salary: '200-300元/月' }), /薪资/);
+  assert.doesNotThrow(() => a.assertIdentity({ ...job, salary: '200-300元/月' }));
   assert.throws(() => a.assertIdentity({ ...job, title: 'AI应用开发实习生' }), /岗位名称/);
-  assert.throws(() => a.assertIdentity({ ...job, city: '北京·海淀' }), /城市/);
+  assert.doesNotThrow(() => a.assertIdentity({ ...job, city: '上海' }));
 });
 test('v3 saved name and company defaults migrate without resetting custom profiles', () => {
   const a = adapter({}, { version: 3, chatRecruiterName: '.name, .boss-name', chatCompany: '.company-name, .company' });
@@ -222,4 +240,76 @@ test('plain messages quoting the PK promotion remain real messages', () => {
 test('real text outside the known card is retained even if it uses an unknown text selector', () => {
   const row = pkNotice(); row.innerText += '\n你每周能实习几天？';
   assert.equal(messageHistory([row]).history.length, 1);
+});
+
+test('title-only matching accepts missing chat salary and city without affecting title rejection', () => {
+  const { a, job } = positionChat({ salary: '', city: '' });
+  assert.doesNotThrow(() => a.assertIdentity({ ...job, salary: '任意薪资', city: '任意城市' }));
+  assert.throws(() => a.assertIdentity({ ...job, title: '另一个岗位' }), /岗位名称/);
+  assert.throws(() => a.assertIdentity({ ...job, title: '' }), /字段缺失/);
+});
+
+test('explicit opt-out skips missing or mismatching job fields but still requires a loaded chat and unique editor', () => {
+  const selectors = { [P.chatHeader]: [element()], [P.composer]: [element()] };
+  const a = adapter(selectors, {}, { verifyChatWindow: false });
+  const job = { jobId: 'target', recruiterId: 'r' };
+  assert.doesNotThrow(() => a.assertIdentity(job));
+  assert.throws(() => adapter(selectors).assertIdentity(job), /岗位名称字段缺失/);
+  selectors[P.chatIdentity] = [element({ [P.chatJobAttr]: 'other' })];
+  assert.doesNotThrow(() => a.assertIdentity(job));
+  selectors[P.chatEmpty] = [element()]; assert.throws(() => a.assertIdentity(job), /未展开/);
+  delete selectors[P.chatEmpty]; selectors[P.composer] = [];
+  assert.throws(() => a.assertIdentity(job), /唯一元素/);
+});
+
+test('position-region fallback reads the title when the position-content wrapper is absent', () => {
+  const { a, header, card, job } = positionChat();
+  header.selectors[P.chatPosition] = [];
+  header.selectors['.chat-position-content'] = [card];
+  assert.doesNotThrow(() => a.assertIdentity(job));
+  card.selectors[P.chatTitle] = [];
+  assert.throws(() => a.assertIdentity(job), /岗位名称字段缺失/);
+});
+
+function editableFixture() {
+  const events = [], input = { isContentEditable: true, textContent: '', innerText: '', focus() {}, dispatchEvent(e) { events.push(e.type); } };
+  const a = adapter({ [P.composer]: [input] });
+  return { a, input, events };
+}
+
+test('contenteditable fallback writes rendered multiline text including the AI disclosure', () => {
+  const { a, input, events } = editableFixture();
+  const text = '您好，我做过相关项目。\n（本消息由 AI 发送）';
+  a.fill(text);
+  assert.equal(input.innerText, text); assert.equal(input.textContent, '');
+  assert.equal(a.editorMatches(text), true); assert.deepEqual(events, ['input', 'change']);
+});
+
+test('native editing inserts once into a collapsed selection inside the empty editor', () => {
+  const { a, input } = editableFixture(); let calls = 0, selected;
+  const range = { selectNodeContents(n) { selected = n; }, collapse(end) { assert.equal(end, false); } };
+  a.doc.getSelection = () => ({ removeAllRanges() {}, addRange(r) { assert.equal(r, range); } });
+  a.doc.createRange = () => range;
+  a.doc.execCommand = (command, ui, text) => { calls++; assert.equal(command, 'insertText'); input.innerText = text; return true; };
+  a.fill('经历介绍\nAI 标注'); assert.equal(selected, input); assert.equal(calls, 1);
+  assert.equal(a.editorMatches('经历介绍\nAI 标注'), true);
+});
+
+test('editor normalization allows only CRLF, NBSP and edge whitespace equivalents', () => {
+  const { a, input } = editableFixture();
+  input.innerText = '项目\u00a0经历\r\nAI 标注\n';
+  assert.equal(a.editorMatches('项目 经历\nAI 标注'), true);
+  assert.equal(a.editorMatches('项目 经历AI 标注'), false);
+  assert.equal(a.editorMatches('其他经历\nAI 标注'), false);
+  input.value = ''; assert.equal(a.editorMatches('项目 经历\nAI 标注'), false);
+});
+
+test('existing rendered drafts and ambiguous partial insertion are preserved', () => {
+  const { a, input } = editableFixture();
+  input.innerText = '已有草稿'; assert.throws(() => a.fill('新文字'), /已有草稿/); assert.equal(input.innerText, '已有草稿');
+  input.innerText = '';
+  a.doc.getSelection = () => ({ removeAllRanges() {}, addRange() {} });
+  a.doc.createRange = () => ({ selectNodeContents() {}, collapse() {} });
+  a.doc.execCommand = () => { input.innerText = '部分写入'; return false; };
+  assert.throws(() => a.fill('新文字'), /写入结果不明确/); assert.equal(input.innerText, '部分写入');
 });

@@ -7,20 +7,20 @@ const source = fs.readFileSync(require('node:path').join(__dirname, '../src/app.
 async function run(options = {}) {
   const store = new Map(), now = Date.now(), callbacks = [], events = [];
   const job = { jobId: 'j', recruiterId: 'r', url: 'https://www.zhipin.com/job_detail/j.html', employmentType: '实习', city: '北京', contactTargetJobId: 'j', alreadyContacted: !!options.alreadyContacted };
-  const c = { ...C.defaults(), autoSend: true, resumeName: '测试简历.pdf', profile: { verifiedContact: true, firstContactOpensEmptyChat: true, verifiedReply: true, verifiedResume: true } };
+  const c = { ...C.defaults(), autoSend: true, verifyChatWindow: options.verifyChatWindow !== false, resumeName: '测试简历.pdf', profile: { verifiedContact: true, firstContactOpensEmptyChat: true, verifiedReply: true, verifiedResume: true } };
   const s = C.emptyState(); s.task = C.createTask(c, now); s.task.leaseToken = 'leader';
   const cmd = { id: 'cmd', workerId: 'worker', taskId: s.task.id, sendId: 'send', owner: 'leader', createdAt: now,
     type: options.type || 'contact', phase: options.phase || 'chat', args: { job, text: '您好，我有相关项目经验', historyTail: 'in1', inboundId: 'in1', resumeName: c.resumeName } };
   s.outbox.push({ id: 'send', status: 'pending', taskId: s.task.id });
   if (options.retryApproved) { cmd.args.retryApproved = true; s.entries[C.pair(job)] = { job, retryApproved: true }; }
   const history = options.history || (cmd.type === 'contact' ? [] : [{ id: 'in1', role: 'recruiter', text: '请发一份简历', rich: false }]);
-  let draft = '';
+  let draft = '', editorReads = 0;
   const p = { detail: 'detail', chatIdentity: 'identity', contact: 'contact', send: 'send', resumeOpen: 'open', resumeDialog: 'dialog', resumeItem: 'item', resumeName: 'name', resumeSend: 'resumeSend', resumeReceipt: 'receipt', chatUrl: 'https://www.zhipin.com/web/geek/chat' };
   class FakeAdapter {
-    constructor() { this.p = p; }
+    constructor(doc, profile, jobs, config = {}) { this.p = p; this.verifyChatWindow = config.verifyChatWindow !== false; }
     health() { if (options.blocked) throw new Error('验证阻止'); }
     chatReady() { return options.emptyChat ? events.includes('selectConversation') && !options.neverLoads : true; }
-    assertIdentity() { if (options.wrongIdentity) throw new Error('身份不匹配'); }
+    assertIdentity() { if (this.verifyChatWindow && options.wrongIdentity) throw new Error('身份不匹配'); }
     history() { return structuredClone(history); }
     nodes(selector) {
       if (selector === 'receipt') return events.includes('resumeSend') ? [{ innerText: c.resumeName }] : [];
@@ -41,6 +41,7 @@ async function run(options = {}) {
       if (options.newMessageDuringFill) history.push({ id: 'in2', role: 'recruiter', text: '另一个问题' });
     }
     editor() { return { value: draft }; }
+    editorMatches(text) { return !options.editorMismatch && ++editorReads > (options.editorDelayReads || 0) && draft === text; }
     jobId() { return 'j'; }
     inspectJob() { return job; }
     safeUrl(url) { return new URL(url); }
@@ -78,6 +79,14 @@ test('worker sends a single custom greeting to a verified empty conversation', a
   assert.equal(events.filter(x => x === 'send').length, 1);
   assert.ok(history.at(-1).text.endsWith(C.AI_NOTICE));
   assert.ok(events.includes('closeWorker'));
+});
+
+test('worker passes the explicit identity opt-out to drafting and receipt checks', async () => {
+  const { events, result } = await run({ wrongIdentity: true, verifyChatWindow: false });
+  assert.equal(result.ok, true); assert.equal(result.data.confirmed, true);
+  assert.equal(events.filter(e => e === 'send').length, 1);
+  const blocked = await run({ verifyChatWindow: false, stopDuringFill: true });
+  assert.equal(blocked.events.includes('send'), false);
 });
 test('disabling auto-send during drafting prevents send and closes the worker', async () => {
   const { events, result } = await run({ disableDuringFill: true });
@@ -120,6 +129,20 @@ test('a target conversation that never loads times out without another contact c
 });
 test('stop signal immediately before click cancels send', async () => {
   const { events, result } = await run({ stopDuringFill: true }); assert.equal(result.ok, false); assert.equal(events.includes('send'), false);
+});
+
+test('a persistently changed editor cancels before click and never retries writing', async () => {
+  const { events, result } = await run({ editorMismatch: true });
+  assert.equal(result.ok, false); assert.match(result.error, /输入框内容与拟发送消息不一致/);
+  assert.equal(events.filter(e => e === 'fill').length, 1);
+  assert.equal(events.includes('send'), false); assert.ok(events.includes('closeWorker'));
+});
+
+test('a delayed editor render is awaited without duplicate writes or duplicate sends', async () => {
+  const { events, result } = await run({ editorDelayReads: 2 });
+  assert.equal(result.ok, true); assert.equal(result.data.confirmed, true);
+  assert.equal(events.filter(e => e === 'fill').length, 1);
+  assert.equal(events.filter(e => e === 'send').length, 1);
 });
 test('new incoming message while drafting prevents stale send', async () => {
   const { events, result } = await run({ newMessageDuringFill: true }); assert.equal(result.ok, false); assert.equal(events.includes('send'), false);

@@ -17,6 +17,13 @@ test('defaults implement Beijing internships and independent refresh/send clocks
   assert.equal(C.randomDelay(c, () => 0.999999), 60000);
   assert.equal(C.randomDelay(c, () => 0.5), 35000);
 });
+
+test('chat window verification defaults on for old configs and requires explicit boolean opt-out', () => {
+  assert.equal(C.defaults().verifyChatWindow, true);
+  assert.equal(C.fixedConfig({}).verifyChatWindow, true);
+  assert.equal(C.validateConfig(C.fixedConfig({ verifyChatWindow: false })).verifyChatWindow, false);
+  assert.throws(() => C.validateConfig(C.fixedConfig({ verifyChatWindow: 'false' })), /verifyChatWindow/);
+});
 test('configuration rejects invalid schedules, bounds and inverted jitter', () => {
   for (const overrides of [{ maxContacts: 0 }, { threshold: NaN }, { sendIntervalSeconds: 1.5 },
     { refreshMinSeconds: 61, refreshMaxSeconds: 60 }, { scheduleEnabled: true },
@@ -151,13 +158,14 @@ test('score alone decides AI eligibility regardless of suitable or uncertain fla
 
 function scoredJob(parts = {}, extra = {}) {
   return { suitable: true, uncertain: false, reason: '核心要求匹配，加分经历尚未证实。', doubts: [], greeting: '您好，我对该岗位感兴趣',
-    greetingEvidence: ['开发过前端项目'], hasBonusRequirements: true, scoreBreakdown: { skills: 36, experience: 22, requirements: 18, preferences: 4, bonus: 0, ...parts }, ...extra };
+    greetingEvidence: ['开发过前端项目'], hasBonusRequirements: true, scoreBreakdown: { skills: 27, experience: 17, requirements: 18, preferences: 18, bonus: 0, ...parts }, ...extra };
 }
 test('weighted job score is calculated by code and optional conditions contribute at most ten points', () => {
   assert.equal(C.SCORING.reduce((sum, part) => sum + part.max, 0), 100);
+  assert.deepEqual(C.SCORING.map(part => part.max), [30, 20, 20, 20, 10]);
   const withoutBonus = C.scoredAnalysis(JSON.stringify(scoredJob({}, { score: 999 })));
   const fullBonus = C.scoredAnalysis(scoredJob({ bonus: 10 }));
-  assert.equal(withoutBonus.score, 80); assert.equal(fullBonus.score, 90); assert.equal(withoutBonus.scoringVersion, 1);
+  assert.equal(withoutBonus.score, 80); assert.equal(fullBonus.score, 90); assert.equal(withoutBonus.scoringVersion, 2);
   assert.equal(C.decide(withoutBonus, C.defaults()), 'eligible');
   assert.ok(withoutBonus.greeting.endsWith(C.AI_NOTICE));
 });
@@ -166,17 +174,32 @@ test('a job without optional requirements receives the neutral bonus value rathe
   assert.equal(result.scoreBreakdown.bonus, 10); assert.equal(result.score, 90);
 });
 test('malformed breakdowns, missing classifications and out-of-range parts are rejected', () => {
-  for (const parts of [{ bonus: 11 }, { skills: -1 }, { experience: '22' }, { preferences: Infinity }, { requirements: NaN }]) {
+  for (const parts of [{ bonus: 11 }, { skills: -1 }, { skills: 31 }, { experience: 21 }, { preferences: 21 }, { experience: '22' }, { preferences: Infinity }, { requirements: NaN }]) {
     assert.throws(() => C.scoredAnalysis(scoredJob(parts)));
   }
   for (const extra of [{ scoreBreakdown: null }, { scoreBreakdown: [] }, { hasBonusRequirements: 'false' }, { hasBonusRequirements: undefined }, { scoreBreakdown: { skills: 40 } }, { scoreBreakdown: { ...scoredJob().scoreBreakdown, extra: 1 } }]) {
     assert.throws(() => C.scoredAnalysis(scoredJob({}, extra)));
   }
 });
+test('preference scoring can change a total by twenty points and stores the applied rubric', () => {
+  const low = C.scoredAnalysis(scoredJob({ preferences: 0 }));
+  const high = C.scoredAnalysis(scoredJob({ preferences: 20 }, { scoringVersion: 1, scoreMaxima: { preferences: 5 } }));
+  assert.equal(high.score - low.score, 20); assert.equal(high.scoringVersion, 2); assert.equal(high.scoreMaxima.preferences, 20);
+  assert.equal(high.scoreMaxima.skills, 30); assert.equal(high.scoreMaxima.experience, 20);
+});
+test('visible scored jobs are skipped by job ID but hidden, unscored or approved retries are not', () => {
+  const entry = { job: { jobId: 'job1' }, analysis: { score: 0 } };
+  assert.equal(C.hasVisibleScore({ x: entry }, 'job1'), true);
+  assert.equal(C.hasVisibleScore({ x: entry }, 'job2'), false);
+  assert.equal(C.hasVisibleScore({ x: { ...entry, hidden: true } }, 'job1'), false);
+  assert.equal(C.hasVisibleScore({ x: { ...entry, analysis: null } }, 'job1'), false);
+  assert.equal(C.hasVisibleScore({ x: { ...entry, analysis: { score: '80' } } }, 'job1'), false);
+  assert.equal(C.hasVisibleScore({ x: entry, y: { ...entry, retryApproved: true } }, 'job1'), false);
+});
 test('weighted totals retain one decimal place and enforce the displayed threshold', () => {
-  const result = C.scoredAnalysis(scoredJob({ skills: 35.85 }));
+  const result = C.scoredAnalysis(scoredJob({ skills: 26.85 }));
   assert.equal(result.score, 79.9); assert.equal(C.decide(result, C.defaults()), 'rejected');
-  assert.equal(C.scoredAnalysis(scoredJob({ skills: 40, experience: 25, requirements: 20, preferences: 5, bonus: 10 })).score, 100);
+  assert.equal(C.scoredAnalysis(scoredJob({ skills: 30, experience: 20, requirements: 20, preferences: 20, bonus: 10 })).score, 100);
 });
 test('greeting experience requires actual resume excerpts and rejects invented evidence', () => {
   const resume = '熟悉 JavaScript，开发过前端项目。';
