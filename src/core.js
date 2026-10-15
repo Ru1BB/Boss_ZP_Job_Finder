@@ -27,6 +27,13 @@
     while (body.endsWith(AI_NOTICE)) body = body.slice(0, -AI_NOTICE.length).trimEnd();
     return body ? body + '\n' + AI_NOTICE : '';
   }
+  function anonymousMessage(text, resume = '', job = {}) {
+    let body = String(text || '');
+    const names = [...resume.matchAll(/(?:^|\n)\s*(?:姓名|名字)\s*[:：]\s*([\u4e00-\u9fff·]{2,12})/g)].map(m => m[1]);
+    for (const name of names) body = body.split(name).join('我');
+    if (job.recruiterName?.trim()) body = body.split(job.recruiterName.trim()).join('您');
+    return aiMessage(body);
+  }
   function fixedConfig(raw = {}) {
     const provider = raw.provider ?? 'qwen';
     if (!Object.hasOwn(PROVIDERS, provider)) fail('不支持的供应商');
@@ -108,8 +115,9 @@
       typeof x.suitable !== 'boolean' || typeof x.uncertain !== 'boolean' ||
       typeof x.reason !== 'string' || !x.reason.trim() || !Array.isArray(x.doubts) ||
       !x.doubts.every(v => typeof v === 'string') || typeof x.greeting !== 'string' || x.greeting.length > 500) fail('AI 筛选结果结构无效');
-    if (x.suitable && !x.uncertain && !x.greeting.trim()) fail('AI 招呼语为空');
+    if (!x.greeting.trim()) fail('AI 招呼语为空');
     x.greeting = aiMessage(x.greeting);
+    if (!x.greeting) fail('AI 招呼语缺少正文');
     return x;
   }
   function reply(raw) {
@@ -126,7 +134,7 @@
   }
   const sensitive = text => /面试|约面|几点|周[一二三四五六日天]|明天|后天|到岗|入职|薪资|工资|待遇|底薪|期望薪|报价|微信|手机号|电话|邮箱|身份证|银行卡|转账|付款|验证码|下载|安装|点击链接|加.{0,3}(微|v|V)/i.test(text);
   const wantsResume = text => !/不用|不必|不需要|不要|别发|无需|已(?:经)?收到|收到了|不方便|暂不|不用再/.test(text) && /(?:请|麻烦|方便|能|可以|能否|能不能).{0,12}(?:发|给|传|提供).{0,12}简历|(?:发|传|给).{0,8}(?:一份|一下|份|个|下).{0,8}简历|简历.{0,12}(?:发我|发来|发一下|给我|方便发)|resume\s*please/i.test(text);
-  function decide(a, config) { return !a.uncertain && a.suitable && a.score >= config.threshold ? 'eligible' : a.uncertain ? 'review' : 'rejected'; }
+  function decide(a, config) { return a.score >= config.threshold ? 'eligible' : 'rejected'; }
   function allowed(state, c, now) {
     if (!state.task || state.task.status !== 'running') return false;
     if (state.task.endAt != null && now >= state.task.endAt) return false;
@@ -149,6 +157,16 @@
     return true;
   }
   const emptyState = () => ({ task: null, lastSendAt: 0, blockedWindow: '', entries: {}, outbox: [], logs: [] });
+  function clearActivity(s) {
+    s.logs = [];
+    const protectedKeys = new Set(s.outbox.filter(item => ['pending', 'sent', 'uncertain'].includes(item.status)).map(item => item.key));
+    for (const [key, entry] of Object.entries(s.entries)) {
+      if (['contacted', 'uncertain', 'existing'].includes(entry.status) || protectedKeys.has(key)) {
+        delete entry.pendingReply; entry.hidden = true;
+      } else delete s.entries[key];
+    }
+    return s;
+  }
   function hardFilter(job, c) {
     const type = job.employmentType || '', city = job.city || '';
     const text = [job.title, type, job.description].filter(Boolean).join('\n');
@@ -176,6 +194,6 @@
   function leaseWinner(claims, now) {
     return claims.filter(c => c && c.expires > now).sort((a, b) => a.claimedAt - b.claimedAt || a.owner.localeCompare(b.owner))[0]?.owner ?? null;
   }
-  return { AI_NOTICE, aiMessage, PROVIDERS, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, parseJSON, analysis, reply, pair,
-    sensitive, wantsResume, decide, allowed, createTask, canSend, emptyState, hardFilter, reserve, publicConfig, leaseWinner };
+  return { AI_NOTICE, aiMessage, anonymousMessage, PROVIDERS, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, parseJSON, analysis, reply, pair,
+    sensitive, wantsResume, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner };
 });

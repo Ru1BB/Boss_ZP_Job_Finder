@@ -34,6 +34,7 @@ async function run(options = {}) {
     fill(text) {
       draft = text;
       events.push('fill');
+      if (options.disableDuringFill) store.set('bossai.v1.config', { ...c, autoSend: false });
       if (options.stopDuringFill) store.set('bossai.v1.stopRequest', { manual: true });
       if (options.newMessageDuringFill) history.push({ id: 'in2', role: 'recruiter', text: '另一个问题' });
     }
@@ -56,6 +57,8 @@ async function run(options = {}) {
     GM_getValue: (k, fallback = null) => store.has(k) ? structuredClone(store.get(k)) : fallback,
     GM_setValue: (k, v) => store.set(k, structuredClone(v)), GM_listValues: () => [...store.keys()], GM_deleteValue: k => store.delete(k),
     setInterval: f => callbacks.push(f), setTimeout: f => { f(); }, Event: class {},
+    window: { close() { events.push('closeWorker'); } },
+    GM_getTab: callback => callback({}), GM_saveTab() {},
     GM_registerMenuCommand() {}, GM_openInTab() {}, addEventListener() {} };
   vm.runInNewContext(source, context);
   // Initial tick is async; drain its promises and any repeated tick deterministically.
@@ -68,6 +71,15 @@ test('worker sends a single custom greeting to a verified empty conversation', a
   const { events, result, history } = await run(); assert.equal(result.ok, true); assert.equal(result.data.confirmed, true);
   assert.equal(events.filter(x => x === 'send').length, 1);
   assert.ok(history.at(-1).text.endsWith(C.AI_NOTICE));
+  assert.ok(events.includes('closeWorker'));
+});
+test('disabling auto-send during drafting prevents send and closes the worker', async () => {
+  const { events, result } = await run({ disableDuringFill: true });
+  assert.equal(result.ok, false); assert.equal(events.includes('send'), false); assert.ok(events.includes('closeWorker'));
+});
+test('reading a conversation closes the worker after returning data', async () => {
+  const { events, result } = await run({ type: 'history' });
+  assert.equal(result.ok, true); assert.ok(Array.isArray(result.data)); assert.ok(events.includes('closeWorker'));
 });
 test('worker adds disclosure to a queued legacy reply that has no marker', async () => {
   const { result, history } = await run({ type: 'reply', history: [{ id: 'in1', role: 'recruiter', text: '你有什么项目经验', rich: false }] });
@@ -88,7 +100,9 @@ test('consumed command after page reload is not reissued', async () => {
 });
 test('expired window, wrong identity and verification block all sends', async () => {
   for (const overrides of [{ expired: true }, { wrongIdentity: true }, { blocked: true }]) {
-    const { events, result } = await run(overrides); assert.equal(result.ok, false); assert.equal(events.includes('send'), false);
+    const { events, result } = await run(overrides);
+    if (!overrides.expired) assert.equal(result.ok, false);
+    assert.equal(events.includes('send'), false); assert.ok(events.includes('closeWorker'));
   }
 });
 test('requested unique attachment sends once and checks receipt', async () => {

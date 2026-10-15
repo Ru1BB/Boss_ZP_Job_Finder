@@ -2,7 +2,7 @@
 (function (root) {
   'use strict';
   const DEFAULT_PROFILE = {
-    version: 1, verifiedContact: false, verifiedReply: false, verifiedResume: false,
+    version: 2, verifiedContact: false, verifiedReply: false, verifiedResume: false,
     firstContactOpensEmptyChat: false,
     card: '.job-card-wrapper, .job-card-box', cardLink: 'a[href*="/job_detail/"]',
     nextPage: '.options-pages .next, .pagination-next', endMarker: '.job-list-empty',
@@ -10,9 +10,14 @@
     employmentType: '.job-banner .job-status, .job-banner .job-type', city: '.job-banner .text-city, .job-banner .job-area',
     salary: '.job-banner .salary',
     recruiter: '[data-boss-id]', recruiterAttr: 'data-boss-id',
-    contact: '.op-btn-chat', chatUrl: 'https://www.zhipin.com/web/geek/chat',
+    recruiterScope: '.boss-info, .boss-info-box, .job-boss-info',
+    recruiterName: '.job-boss-info h2.name, .boss-info h2, .boss-info .name, .boss-info-box h2, .boss-name',
+    company: '.sider-company .company-info a, .job-boss-info .boss-info-attr, .job-company-info .company-name, .job-banner .company-name, .boss-info .company-name, .boss-info .boss-title',
+    contact: '.op-btn-chat, .btn-startchat', chatUrl: 'https://www.zhipin.com/web/geek/chat',
     conversation: '[data-boss-id][data-job-id]', conversationRecruiterAttr: 'data-boss-id', conversationJobAttr: 'data-job-id',
     chatIdentity: '[data-current-boss-id][data-current-job-id]', chatRecruiterAttr: 'data-current-boss-id', chatJobAttr: 'data-current-job-id',
+    chatHeader: '.chat-info, .chat-header, .conversation-header',
+    chatRecruiterName: '.name, .boss-name', chatCompany: '.company-name, .company',
     messages: '[data-message-id]', messageIdAttr: 'data-message-id',
     messageIncoming: '.message-item.friend', messageOutgoing: '.message-item.myself',
     messageText: '.text', richMessage: 'img:not(.emoji), audio, video, .file-card',
@@ -22,7 +27,10 @@
     blocked: '.geetest_panel, .captcha-box, .verify-wrap, .login-dialog'
   };
   class Adapter {
-    constructor(doc = document, profile = {}) { this.doc = doc; this.p = { ...DEFAULT_PROFILE, ...profile }; }
+    constructor(doc = document, profile = {}) {
+      this.doc = doc; this.p = { ...DEFAULT_PROFILE, ...profile };
+      if (profile.contact === '.op-btn-chat') this.p.contact = DEFAULT_PROFILE.contact;
+    }
     nodes(selector, scope = this.doc) {
       if (!selector) return [];
       try { return [...scope.querySelectorAll(selector)].filter(n => n.getClientRects().length && !n.closest('#boss-ai-host')); }
@@ -44,6 +52,42 @@
       return u;
     }
     jobId(url) { return new URL(url, this.doc.location.href).pathname.match(/\/job_detail\/([^/.]+)/)?.[1] || ''; }
+    uniqueText(selector, scope = this.doc, person = false) {
+      const values = this.nodes(selector, scope).map(n => {
+        const direct = person ? [...(n.childNodes || [])].filter(c => c.nodeType === 3).map(c => c.textContent).join('') : '';
+        return (direct.trim() || n.innerText || n.textContent || '').split('\n')[0]
+          .replace(/(?:刚刚活跃|今日活跃|本周活跃|本月活跃|\d+分钟前活跃).*$/, '').split(/\s*[·•]\s*/)[0].trim();
+      }).filter(Boolean);
+      const unique = [...new Set(values)]; return unique.length === 1 ? unique[0] : '';
+    }
+    visibleRecruiter(name, company) { return name && company ? 'visible-context:' + JSON.stringify([company, name]) : ''; }
+    recruiterInfo() {
+      const candidates = [], add = (value, source) => {
+        if (value && /^[a-zA-Z0-9_~.-]{1,200}$/.test(value)) candidates.push({ value, source });
+      };
+      for (const n of this.nodes(this.p.recruiter)) add(n.getAttribute(this.p.recruiterAttr), 'configured:' + this.p.recruiterAttr);
+      const attrs = ['data-boss-id', 'data-bossid', 'data-boss-uid', 'data-recruiter-id', 'data-encrypt-boss-id'];
+      const scopes = this.nodes(this.p.recruiterScope), contacts = this.nodes(this.p.contact);
+      for (const n of [...scopes, ...contacts, ...scopes.flatMap(scope => this.nodes(attrs.map(a => '[' + a + ']').join(','), scope))]) {
+        for (const attr of attrs) add(n.getAttribute(attr), attr);
+      }
+      for (const n of [...contacts, ...scopes.flatMap(scope => this.nodes('a[href]', scope))]) {
+        try {
+          const u = new URL(n.getAttribute('href') || '', this.doc.location.href);
+          if (u.origin !== 'https://www.zhipin.com') continue;
+          for (const key of ['bossId', 'bossid', 'encryptBossId', 'boss_id']) add(u.searchParams.get(key), 'link:' + key);
+          add(u.pathname.match(/\/boss_detail\/([^/.]+)\.html/)?.[1], 'link:boss_detail');
+        } catch { /* invalid or javascript link */ }
+      }
+      const ids = [...new Set(candidates.map(c => c.value))];
+      const name = this.uniqueText(this.p.recruiterName, this.doc, true), company = this.uniqueText(this.p.company);
+      const contextId = this.visibleRecruiter(name, company);
+      return { recruiterId: ids.length === 1 ? ids[0] : ids.length === 0 ? contextId : '',
+        recruiterName: name, company, identityType: ids.length === 1 ? 'platform-id' : contextId && !ids.length ? 'visible-context' : 'unresolved',
+        identityDiagnostic: { candidateCount: ids.length, sources: [...new Set(candidates.map(c => c.source))],
+          nameFound: !!name, companyFound: !!company,
+          status: ids.length > 1 ? 'conflicting' : ids.length || contextId ? 'resolved' : 'missing' } };
+    }
     cards() {
       this.health();
       const links = this.nodes(this.p.card).flatMap(card => this.nodes(this.p.cardLink, card));
@@ -58,23 +102,44 @@
       const jobId = this.jobId(this.doc.location.href);
       const description = this.text(this.p.detail);
       if (!jobId || description.length < 20) throw new Error('职位详情未加载或选择器不匹配');
-      const recruiters = this.nodes(this.p.recruiter);
-      const ids = [...new Set(recruiters.map(n => n.getAttribute(this.p.recruiterAttr)).filter(Boolean))];
+      const recruiter = this.recruiterInfo();
       const contactText = this.text(this.p.contact);
-      return { jobId, recruiterId: ids.length === 1 ? ids[0] : '', url: this.doc.location.href.split('#')[0],
+      const buttons = this.nodes(this.p.contact);
+      let contactTargetJobId = '';
+      if (buttons.length === 1) {
+        try {
+          const target = new URL(buttons[0].getAttribute('data-url') || '', this.doc.location.href);
+          if (target.origin === 'https://www.zhipin.com') contactTargetJobId = target.searchParams.get('jobId') || '';
+        } catch { /* no explicit target */ }
+      }
+      return { jobId, ...recruiter, url: this.doc.location.href.split('#')[0],
         title: this.text(this.p.title).slice(0, 200), description: description.slice(0, 20000),
         employmentType: (this.text(this.p.employmentType) || (/实习/.test(this.text(this.p.title)) ? '实习' : '')).slice(0, 100), city: this.text(this.p.city).slice(0, 100),
         salary: this.text(this.p.salary).slice(0, 200),
+        contactTargetJobId,
         alreadyContacted: /继续沟通|已沟通/.test(contactText) };
     }
     identity() {
-      const el = this.one(this.p.chatIdentity);
-      const job = { jobId: el.getAttribute(this.p.chatJobAttr), recruiterId: el.getAttribute(this.p.chatRecruiterAttr) };
+      const el = this.one(this.p.chatIdentity, this.doc, true);
+      if (!el) {
+        const header = this.one(this.p.chatHeader);
+        const links = this.nodes('a[href*="/job_detail/"]', header);
+        const jobIds = [...new Set(links.map(a => this.jobId(this.safeUrl(a.href).href)).filter(Boolean))];
+        const name = this.uniqueText(this.p.chatRecruiterName, header, true), company = this.uniqueText(this.p.chatCompany, header);
+        const recruiterId = this.visibleRecruiter(name, company);
+        if (jobIds.length !== 1 || !recruiterId) throw new Error('聊天页需同时显示唯一岗位链接、公司及招聘者，当前无法核对');
+        return { jobId: jobIds[0], recruiterId, recruiterName: name, company, identityType: 'visible-context' };
+      }
+      const job = { jobId: el.getAttribute(this.p.chatJobAttr), recruiterId: el.getAttribute(this.p.chatRecruiterAttr), identityType: 'platform-id' };
       root.BossCore.pair(job);
       return job;
     }
     assertIdentity(job) {
-      if (root.BossCore.pair(this.identity()) !== root.BossCore.pair(job)) throw new Error('当前会话与目标岗位/招聘者不一致，已停止');
+      const actual = this.identity();
+      if (root.BossCore.pair(actual) === root.BossCore.pair(job)) return;
+      if (actual.jobId === job.jobId && actual.identityType === 'visible-context' && job.recruiterName && job.company &&
+        actual.recruiterName === job.recruiterName && actual.company === job.company) return;
+      throw new Error('当前会话与目标岗位/招聘者不一致，已停止');
     }
     history(job) {
       this.health(); this.assertIdentity(job);
@@ -121,7 +186,7 @@
       let job, identity;
       try { const x = this.inspectJob(); job = { jobIdFound: !!x.jobId, recruiterIdFound: !!x.recruiterId, descriptionLength: x.description.length }; } catch { /* not detail */ }
       try { this.identity(); identity = '岗位及招聘者 ID 可读取'; } catch { identity = '不可读取；自动聊天不可用'; }
-      return { page: this.doc.location.pathname, counts, job, identity,
+      return { page: this.doc.location.pathname, counts, job, recruiter: this.recruiterInfo().identityDiagnostic, identity,
         warning: '诊断只读取页面，不证明立即沟通是否自动发送招呼。verified 标记必须在人工验证流程后设置。' };
     }
     advance() {

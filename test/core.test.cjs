@@ -67,6 +67,11 @@ test('AI disclosure is appended once to greetings and replies, including old que
   assert.ok(C.analysis({ score: 90, suitable: true, uncertain: false, reason: '符合', doubts: [], greeting: '您好' }).greeting.endsWith(C.AI_NOTICE));
   assert.ok(C.reply({ action: 'reply', text: '我有项目经验', reason: '有依据', evidence: ['项目经验'] }).text.endsWith(C.AI_NOTICE));
 });
+test('known personal names are replaced at the final message boundary', () => {
+  const result = C.anonymousMessage('您好赵女士，我是张小明，来自示例大学。', '姓名：张小明。\n学校：示例大学', { recruiterName: '赵女士' });
+  assert.equal(result.includes('张小明'), false); assert.equal(result.includes('赵女士'), false);
+  assert.ok(result.includes('示例大学')); assert.ok(result.endsWith(C.AI_NOTICE));
+});
 test('daily Beijing window start inclusive/end exclusive independent of host timezone', () => {
   const c = { ...C.defaults(), scheduleEnabled: true, startTime: '09:00', stopTime: '18:00' };
   assert.equal(C.schedule(c, Date.parse('2026-10-14T00:59:59Z')).active, false);
@@ -128,8 +133,31 @@ test('AI malformed values and blank greetings fail closed', () => {
   const good = { score: 88, suitable: true, uncertain: false, reason: '符合', doubts: [], greeting: '您好' };
   assert.equal(C.analysis(JSON.stringify(good)).score, 88);
   for (const bad of ['nonsense', '{}', JSON.stringify({ ...good, score: '90' }), JSON.stringify({ ...good, greeting: '' }), JSON.stringify({ ...good, score: 101 })]) assert.throws(() => C.analysis(bad));
-  assert.equal(C.decide({ ...good, uncertain: true }, C.defaults()), 'review');
+  assert.equal(C.decide({ ...good, uncertain: true }, C.defaults()), 'eligible');
   assert.equal(C.decide({ ...good, score: 79 }, C.defaults()), 'rejected');
+});
+test('score alone decides AI eligibility regardless of suitable or uncertain flags', () => {
+  for (const suitable of [true, false]) for (const uncertain of [true, false]) {
+    assert.equal(C.decide({ score: 62, suitable, uncertain }, { threshold: 60 }), 'eligible');
+    assert.equal(C.decide({ score: 80, suitable, uncertain }, { threshold: 80 }), 'eligible');
+    assert.equal(C.decide({ score: 79, suitable, uncertain }, { threshold: 80 }), 'rejected');
+  }
+});
+test('clear activity removes pending items while retaining dedupe and spacing records', () => {
+  const { s, c, entry } = setup();
+  s.logs = [{ message: '旧日志' }]; s.task.contacts = 7; s.task.visited = ['old-job']; s.lastSendAt = now;
+  s.entries[entry.key].status = 'contacted'; s.entries[entry.key].pendingReply = { text: '排队回复' };
+  s.entries.review = { key: 'review', status: 'review' }; s.entries.eligible = { key: 'eligible', status: 'eligible' };
+  s.entries.uncertain = { key: 'uncertain', status: 'uncertain', handoff: true };
+  s.entries.existing = { key: 'existing', status: 'existing' };
+  s.outbox.push({ id: 'old', key: entry.key, status: 'sent' });
+  C.clearActivity(s);
+  assert.deepEqual(s.logs, []); assert.equal(s.entries.review, undefined); assert.equal(s.entries.eligible, undefined);
+  assert.equal(s.entries[entry.key].status, 'contacted'); assert.equal(s.entries[entry.key].hidden, true);
+  assert.equal(s.entries[entry.key].pendingReply, undefined); assert.equal(s.entries.uncertain.handoff, true);
+  assert.equal(s.entries.existing.hidden, true); assert.equal(s.outbox.length, 1);
+  assert.equal(s.lastSendAt, now); assert.equal(s.task.contacts, 7); assert.deepEqual(s.task.visited, ['old-job']);
+  assert.equal(C.canSend(s, c, now + 1000, 'reply', s.entries[entry.key]), false);
 });
 test('reply schema requires evidence and rejects invented action names', () => {
   assert.throws(() => C.reply('{"action":"reply","text":"你好","reason":"","evidence":[]}'));
