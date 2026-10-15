@@ -24,6 +24,11 @@ test('configuration rejects invalid schedules, bounds and inverted jitter', () =
     assert.throws(() => C.validateConfig({ ...C.defaults(), ...overrides }));
   }
 });
+test('AI timeout defaults migrate to 180 seconds and allow only bounded whole seconds', () => {
+  assert.equal(C.fixedConfig({ provider: 'qwen' }).aiTimeoutSeconds, 180);
+  for (const aiTimeoutSeconds of [29, 601, 60.5, '180', NaN]) assert.throws(() => C.validateConfig({ ...C.defaults(), aiTimeoutSeconds }));
+  for (const aiTimeoutSeconds of [30, 180, 600]) assert.doesNotThrow(() => C.validateConfig({ ...C.defaults(), aiTimeoutSeconds }));
+});
 test('provider endpoints and models are fixed and reject unknown providers', () => {
   assert.equal(C.fixedConfig().baseUrl, 'https://maas.qianwenaiapi.com/compatible-mode/v1');
   assert.equal(C.fixedConfig({ provider: 'qwen', model: 'override' }).model, 'qwen3.8-flash');
@@ -142,6 +147,57 @@ test('score alone decides AI eligibility regardless of suitable or uncertain fla
     assert.equal(C.decide({ score: 80, suitable, uncertain }, { threshold: 80 }), 'eligible');
     assert.equal(C.decide({ score: 79, suitable, uncertain }, { threshold: 80 }), 'rejected');
   }
+});
+
+function scoredJob(parts = {}, extra = {}) {
+  return { suitable: true, uncertain: false, reason: '核心要求匹配，加分经历尚未证实。', doubts: [], greeting: '您好，我对该岗位感兴趣',
+    greetingEvidence: ['开发过前端项目'], hasBonusRequirements: true, scoreBreakdown: { skills: 36, experience: 22, requirements: 18, preferences: 4, bonus: 0, ...parts }, ...extra };
+}
+test('weighted job score is calculated by code and optional conditions contribute at most ten points', () => {
+  assert.equal(C.SCORING.reduce((sum, part) => sum + part.max, 0), 100);
+  const withoutBonus = C.scoredAnalysis(JSON.stringify(scoredJob({}, { score: 999 })));
+  const fullBonus = C.scoredAnalysis(scoredJob({ bonus: 10 }));
+  assert.equal(withoutBonus.score, 80); assert.equal(fullBonus.score, 90); assert.equal(withoutBonus.scoringVersion, 1);
+  assert.equal(C.decide(withoutBonus, C.defaults()), 'eligible');
+  assert.ok(withoutBonus.greeting.endsWith(C.AI_NOTICE));
+});
+test('a job without optional requirements receives the neutral bonus value rather than a penalty', () => {
+  const result = C.scoredAnalysis(scoredJob({}, { hasBonusRequirements: false }));
+  assert.equal(result.scoreBreakdown.bonus, 10); assert.equal(result.score, 90);
+});
+test('malformed breakdowns, missing classifications and out-of-range parts are rejected', () => {
+  for (const parts of [{ bonus: 11 }, { skills: -1 }, { experience: '22' }, { preferences: Infinity }, { requirements: NaN }]) {
+    assert.throws(() => C.scoredAnalysis(scoredJob(parts)));
+  }
+  for (const extra of [{ scoreBreakdown: null }, { scoreBreakdown: [] }, { hasBonusRequirements: 'false' }, { hasBonusRequirements: undefined }, { scoreBreakdown: { skills: 40 } }, { scoreBreakdown: { ...scoredJob().scoreBreakdown, extra: 1 } }]) {
+    assert.throws(() => C.scoredAnalysis(scoredJob({}, extra)));
+  }
+});
+test('weighted totals retain one decimal place and enforce the displayed threshold', () => {
+  const result = C.scoredAnalysis(scoredJob({ skills: 35.85 }));
+  assert.equal(result.score, 79.9); assert.equal(C.decide(result, C.defaults()), 'rejected');
+  assert.equal(C.scoredAnalysis(scoredJob({ skills: 40, experience: 25, requirements: 20, preferences: 5, bonus: 10 })).score, 100);
+});
+test('greeting experience requires actual resume excerpts and rejects invented evidence', () => {
+  const resume = '熟悉 JavaScript，开发过前端项目。';
+  assert.equal(C.scoredAnalysis(scoredJob(), resume).greetingEvidence[0], '开发过前端项目');
+  for (const greetingEvidence of [[], ['带领十人团队提升性能50%'], ['项目'], undefined]) {
+    assert.throws(() => C.scoredAnalysis(scoredJob({}, { greetingEvidence }), resume), /简历原文依据/);
+  }
+});
+test('AI disclosure only proves an outgoing AI message, not a recruiter quotation', () => {
+  assert.equal(C.firstContactStatus([]), 'empty');
+  assert.equal(C.firstContactStatus([{ role: 'candidate', text: '您好' + C.AI_NOTICE }]), 'ai-sent');
+  assert.equal(C.firstContactStatus([{ role: 'candidate', text: '平台默认招呼' }]), 'manual-sent');
+  assert.equal(C.firstContactStatus([{ role: 'recruiter', text: C.AI_NOTICE }]), 'incoming-or-unknown');
+});
+test('local sent and uncertain records prevent contact even if the entry is accidentally eligible', () => {
+  for (const status of ['sent', 'pending', 'uncertain', 'duplicate']) {
+    const { s, c, entry } = setup(); s.outbox.push({ key: entry.key, kind: 'contact', status });
+    assert.equal(C.canSend(s, c, now, 'contact', entry), false);
+  }
+  const { s, c, entry } = setup(); s.outbox.push({ key: entry.key, kind: 'contact', status: 'reviewed-not-sent' });
+  assert.equal(C.canSend(s, c, now, 'contact', entry), true);
 });
 test('clear activity removes pending items while retaining dedupe and spacing records', () => {
   const { s, c, entry } = setup();

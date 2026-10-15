@@ -4,7 +4,7 @@ const root = path.resolve(__dirname, '..');
 const header = `// ==UserScript==
 // @name         BOSS AI 求职助手（试运行优先）
 // @namespace    local.boss-ai
-// @version      0.1.6
+// @version      0.1.12
 // @description  AI 职位筛选、受控沟通与北京时间调度；请先校准页面
 // @match        https://www.zhipin.com/*
 // @grant        GM_getValue

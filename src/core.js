@@ -10,11 +10,24 @@
     qwen: Object.freeze({ baseUrl: 'https://maas.qianwenaiapi.com/compatible-mode/v1', model: 'qwen3.8-flash' }),
     deepseek: Object.freeze({ baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash' })
   });
+  const SCORING = Object.freeze([
+    { key: 'skills', label: '核心技能与工作内容', max: 40 },
+    { key: 'experience', label: '项目经历与可迁移能力', max: 25 },
+    { key: 'requirements', label: '基本任职条件', max: 20 },
+    { key: 'preferences', label: '求职偏好', max: 5 },
+    { key: 'bonus', label: '加分项与优先条件', max: 10 }
+  ].map(Object.freeze));
+  const scoringPrompt = '采用固定100分制，按以下分项给分：' + SCORING.map(x => `${x.key}（${x.label}）0到${x.max}分`).join('；') + '。' +
+    '先将岗位条款分为核心职责、明确必需条件、非必需加分条件。“加分项”“有下列经历者优先”“优先考虑”“有则更佳”“nice to have”“plus”等非必需条款只影响bonus，合计最多10分；缺少它们不得在skills、experience、requirements或preferences重复扣分，不得因此认定不适合。若同一技能在另一条款明确列为必须，则按必需条件评估，但同一缺口仍不得重复扣分。' +
+    'skills评价完成核心工作的技能基础，experience评价相关项目、成果及可迁移能力，requirements评价明确必需的专业、学历、年级、实习时长等，preferences评价用户提供的岗位方向等偏好。北京及实习类型由脚本先过滤，不重复扣分。' +
+    '各分项按匹配程度给分：充分匹配可得该项满分的90%到100%，大部分匹配75%到89%，部分匹配50%到74%，明显不匹配0%到49%。没有证据时不能当作已经掌握；未提及与明确不满足应区别说明，可迁移经历可以获得部分分数。信息缺失写入doubts，不在其他分项再次扣同一缺口。' +
+    'hasBonusRequirements表示岗位是否列有非必需加分条件。有加分条件但简历没有相应证据时bonus可以为0；没有任何加分条款时hasBonusRequirements=false，bonus按10分中性计入，避免因岗位没有写加分项而降低总分。' +
+    'reason说明各分项得分依据及主要扣分原因，区分必需条件与加分条件。总分由脚本加总，不自行另设权重、惩罚或一票否决。用户补充筛选要求可以说明偏好，但不改变本评分权重。';
   const defaults = () => ({
     provider: 'qwen', ...PROVIDERS.qwen, apiKey: '', resume: '', preferences: '',
     screeningPrompt: '综合考虑我的经历、技能和求职偏好，说明匹配理由与不确定性。',
     greetingPrompt: '用自然、简短的中文打招呼，突出真实匹配点，不编造经历，不承诺薪资或面试。',
-    threshold: 80, maxContacts: 50, sendIntervalSeconds: 180,
+    threshold: 80, maxContacts: 50, sendIntervalSeconds: 180, aiTimeoutSeconds: 180,
     refreshMinSeconds: 10, refreshMaxSeconds: 60, maxReplies: 5,
     scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false,
     resumeName: '', internshipOnly: true, requiredCity: '北京', profile: {}
@@ -50,7 +63,7 @@
     for (const key of ['autoSend', 'scheduleEnabled', 'internshipOnly']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
     for (const [key, min, max] of [['threshold', 0, 100], ['maxContacts', 1, 500],
       ['sendIntervalSeconds', 1, 86400], ['refreshMinSeconds', 1, 3600],
-      ['refreshMaxSeconds', 1, 3600], ['maxReplies', 1, 100]]) {
+      ['refreshMaxSeconds', 1, 3600], ['maxReplies', 1, 100], ['aiTimeoutSeconds', 30, 600]]) {
       if (!Number.isInteger(c[key]) || c[key] < min || c[key] > max) fail(`配置 ${key} 必须是 ${min}–${max} 的整数`);
     }
     if (c.refreshMaxSeconds < c.refreshMinSeconds) fail('随机等待上限不能小于下限');
@@ -120,6 +133,26 @@
     if (!x.greeting) fail('AI 招呼语缺少正文');
     return x;
   }
+  function scoredAnalysis(raw, resume = '') {
+    const x = typeof raw === 'string' ? parseJSON(raw) : raw;
+    const parts = x?.scoreBreakdown;
+    if (!x || typeof x !== 'object' || Array.isArray(x) || typeof x.hasBonusRequirements !== 'boolean' ||
+      !parts || typeof parts !== 'object' || Array.isArray(parts) || Object.keys(parts).length !== SCORING.length) fail('AI 分项评分结构无效');
+    const scoreBreakdown = {};
+    for (const { key, max } of SCORING) {
+      if (!Number.isFinite(parts[key]) || parts[key] < 0 || parts[key] > max) fail('AI 分项评分超出范围：' + key);
+      scoreBreakdown[key] = key === 'bonus' && !x.hasBonusRequirements ? max : parts[key];
+    }
+    if (!Array.isArray(x.greetingEvidence) || !x.greetingEvidence.length || x.greetingEvidence.length > 3 ||
+      !x.greetingEvidence.every(e => typeof e === 'string' && e.trim().length >= 4 && e.length <= 200 && (!resume || resume.includes(e.trim())))) fail('AI 招呼缺少可核对的简历原文依据');
+    const score = Math.round(Object.values(scoreBreakdown).reduce((sum, value) => sum + value, 0) * 10) / 10;
+    return analysis({ ...x, scoreBreakdown, score, scoringVersion: 1 });
+  }
+  function firstContactStatus(history) {
+    if (history.some(m => m.role === 'candidate' && typeof m.text === 'string' && m.text.includes(AI_NOTICE))) return 'ai-sent';
+    if (history.some(m => m.role === 'candidate')) return 'manual-sent';
+    return history.length ? 'incoming-or-unknown' : 'empty';
+  }
   function reply(raw) {
     const x = typeof raw === 'string' ? parseJSON(raw) : raw;
     if (!x || !['reply', 'resume', 'handoff'].includes(x.action) || typeof x.text !== 'string' ||
@@ -152,6 +185,8 @@
     if (!allowed(s, c, now) || !c.autoSend) return false;
     if (now < (s.lastSendAt ?? 0) + c.sendIntervalSeconds * 1000) return false;
     if (kind === 'contact' && s.task.contacts >= c.maxContacts) return false;
+    if (kind === 'contact' && (!entry || entry.status !== 'eligible' || entry.handoff ||
+      s.outbox.some(item => item.key === entry.key && item.kind === 'contact' && ['sent', 'pending', 'uncertain', 'duplicate'].includes(item.status)))) return false;
     if (kind !== 'contact' && (!entry || entry.status !== 'contacted' || entry.handoff)) return false;
     if (kind === 'reply' && (s.task.replies[entry.key] || 0) >= c.maxReplies) return false;
     return true;
@@ -161,7 +196,7 @@
     s.logs = [];
     const protectedKeys = new Set(s.outbox.filter(item => ['pending', 'sent', 'uncertain'].includes(item.status)).map(item => item.key));
     for (const [key, entry] of Object.entries(s.entries)) {
-      if (['contacted', 'uncertain', 'existing'].includes(entry.status) || protectedKeys.has(key)) {
+      if (['contacted', 'uncertain', 'retryable', 'existing'].includes(entry.status) || protectedKeys.has(key)) {
         delete entry.pendingReply; entry.hidden = true;
       } else delete s.entries[key];
     }
@@ -183,7 +218,7 @@
   function reserve(s, c, now, kind, entry, payload) {
     if (!canSend(s, c, now, kind, entry)) fail('当前不允许发送');
     const id = `${s.task.id}-${s.outbox.length}-${now}`;
-    const item = { id, taskId: s.task.id, key: entry.key, kind, payload, status: 'pending', createdAt: now };
+    const item = { id, taskId: s.task.id, key: entry.key, kind, payload, status: 'pending', stage: 'reserved', createdAt: now };
     s.outbox.push(item); s.lastSendAt = now;
     if (kind === 'contact') { s.task.contacts++; entry.status = 'uncertain'; }
     if (kind === 'reply') s.task.replies[entry.key] = (s.task.replies[entry.key] || 0) + 1;
@@ -194,6 +229,6 @@
   function leaseWinner(claims, now) {
     return claims.filter(c => c && c.expires > now).sort((a, b) => a.claimedAt - b.claimedAt || a.owner.localeCompare(b.owner))[0]?.owner ?? null;
   }
-  return { AI_NOTICE, aiMessage, anonymousMessage, PROVIDERS, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, parseJSON, analysis, reply, pair,
+  return { AI_NOTICE, aiMessage, anonymousMessage, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, parseJSON, analysis, reply, pair,
     sensitive, wantsResume, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner };
 });

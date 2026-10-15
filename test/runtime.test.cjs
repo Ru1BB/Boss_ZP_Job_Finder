@@ -81,6 +81,24 @@ test('AI request targets the custom endpoint and does not follow redirects', asy
   };
   assert.equal(await r.api.requestAI(r.c, 'test', { test: true }), '{"ok":true}');
 });
+
+test('job analysis sends the weighted optional-condition rule and uses the computed total', async () => {
+  const r = runtime(); let called = false;
+  r.context.GM_xmlhttpRequest = args => {
+    called = true;
+    const request = JSON.parse(args.data), system = request.messages[0].content;
+    assert.ok(system.includes('有下列经历者优先')); assert.ok(system.includes('不得重复扣分'));
+    assert.ok(system.includes('合计最多10分')); assert.ok(system.includes('scoreBreakdown'));
+    assert.equal(JSON.parse(request.messages[1].content).job.jobId, 'job1');
+    queueMicrotask(() => args.onload({ status: 200, responseText: JSON.stringify({ choices: [{ message: { content: JSON.stringify({ score: 12,
+      scoreBreakdown: { skills: 36, experience: 22, requirements: 18, preferences: 4, bonus: 0 }, hasBonusRequirements: true,
+      suitable: false, uncertain: true, reason: '主要条件匹配，缺少的仅为加分经历', doubts: ['加分经历未证实'], greeting: '您好，我开发过前端项目，对该岗位感兴趣', greetingEvidence: ['开发过前端项目'] }) } }] }) }));
+    return { abort() {} };
+  };
+  const result = await r.api.analyze(r.c, { jobId: 'job1' });
+  assert.equal(called, true); assert.equal(result.score, 80); assert.equal(result.scoreBreakdown.bonus, 0);
+  assert.equal(C.decide(result, r.c), 'eligible');
+});
 test('GM permission failures and status-zero responses provide safe diagnostics', async () => {
   for (const mode of ['error', 'zero', 'throw']) {
     const r = runtime();
@@ -105,6 +123,67 @@ test('DeepSeek requests always use the specified fixed endpoint and model', asyn
 test('a changed legacy destination cannot silently reuse stored credentials', () => {
   const r = runtime({ baseUrl: 'https://legacy.example/v1' });
   assert.throws(() => r.api.requestAI(r.c, 'test', {}), /重新填写/);
+});
+test('manual AI deadline uses the configured limit and preserves timeout when abort fires synchronously', async () => {
+  const r = runtime({ aiTimeoutSeconds: 90 }), timers = []; let request, aborts = 0;
+  r.context.setTimeout = (fn, ms) => { timers.push({ fn, ms }); return 1; }; r.context.clearTimeout = () => {};
+  r.context.GM_xmlhttpRequest = args => { request = args; return { abort() { aborts++; args.onabort(); } }; };
+  const pending = r.api.requestAI(r.c, 'test', { resume: 'private-resume-text' }, '职位分析');
+  assert.equal(request.timeout, 90000); assert.equal(timers[0].ms, 90000);
+  const rejected = assert.rejects(pending, e => /职位分析请求超时/.test(e.message) && e.message.includes('90秒') && !e.message.includes('private-resume-text') && !e.message.includes('fake-test-key'));
+  timers[0].fn(); await rejected; assert.equal(aborts, 1);
+  request.onload({ status: 200, responseText: JSON.stringify({ choices: [{ message: { content: '{"late":true}' } }] }) });
+});
+test('native AI timeout reports the configured purpose without issuing a retry', async () => {
+  const r = runtime({ aiTimeoutSeconds: 240 }); let request, calls = 0;
+  r.context.GM_xmlhttpRequest = args => { request = args; calls++; return { abort() {} }; };
+  const pending = r.api.requestAI(r.c, 'test', {}, '聊天回复');
+  const rejected = assert.rejects(pending, /聊天回复请求超时.*240秒/);
+  request.ontimeout(); await rejected; assert.equal(calls, 1);
+});
+test('stopping a long-running AI request remains cancellation rather than timeout', async () => {
+  const r = runtime({ aiTimeoutSeconds: 600 }); r.api.start(); let aborts = 0;
+  r.context.GM_xmlhttpRequest = args => ({ abort() { aborts++; args.onabort(); } });
+  const pending = r.api.requestAI(r.c, 'test', {});
+  const rejected = assert.rejects(pending, /^Error: 请求已停止$/);
+  r.api.stop('停止'); await rejected; assert.equal(aborts, 1); assert.equal(r.state().task.status, 'paused');
+});
+test('short connection tests require ok:true and do not mistake arbitrary JSON for success', async () => {
+  for (const [value, success] of [[{ ok: true }, true], [{ ok: false }, false], [{ error: 'test-error' }, false], [null, false]]) {
+    const r = runtime();
+    r.context.GM_xmlhttpRequest = args => {
+      assert.equal(JSON.parse(args.data).messages[1].content, '{"test":true}');
+      queueMicrotask(() => args.onload({ status: 200, responseText: JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) } }] }) }));
+      return { abort() {} };
+    };
+    if (success) assert.equal((await r.api.testConnection(r.c)).ok, true);
+    else await assert.rejects(r.api.testConnection(r.c), /不能判定测试通过/);
+  }
+});
+test('error envelopes, truncated JSON and absent text are reported without exposing raw response data', async () => {
+  for (const [envelope, reason] of [[{ error: { message: 'fake-test-key' } }, /服务返回错误/],
+    [{ choices: [{ finish_reason: 'length', message: { content: '{"partial":' } }] }, /被截断/],
+    [{ choices: [{ message: { content: null } }] }, /文字正文/],
+    [{ choices: [] }, /文字正文/]]) {
+    const r = runtime();
+    r.context.GM_xmlhttpRequest = args => {
+      queueMicrotask(() => args.onload({ status: 200, responseText: JSON.stringify(envelope) }));
+      return { abort() {} };
+    };
+    await assert.rejects(r.api.requestAI(r.c, 'test', {}), e => reason.test(e.message) && !e.message.includes('fake-test-key'));
+  }
+});
+test('formal analysis only sends necessary job text, excluding URLs and local identity/automation fields', async () => {
+  const r = runtime(); let payload;
+  r.context.GM_xmlhttpRequest = args => {
+    payload = JSON.parse(JSON.parse(args.data).messages[1].content);
+    queueMicrotask(() => args.onerror({ status: 503 })); return { abort() {} };
+  };
+  await assert.rejects(r.api.analyze(r.c, { jobId: 'j', title: '测试岗位', description: '测试描述', city: '北京', salary: '100元/天', company: '示例公司',
+    url: 'https://www.zhipin.com/job_detail/j.html?securityId=private-local-value', recruiterId: 'local-id', contactTargetJobId: 'j', identityDiagnostic: { token: 'private-local-value' } }));
+  assert.equal(payload.job.description, '测试描述'); assert.equal(payload.job.salary, '100元/天');
+  assert.equal(JSON.stringify(payload).includes('private-local-value'), false);
+  assert.equal(Object.hasOwn(payload.job, 'recruiterId'), false);
 });
 test('clicking start in an idle second tab takes ownership from the older idle tab', async () => {
   const first = runtime(), second = runtime({}, first.store, 1000);
@@ -201,5 +280,87 @@ test('clearing from a non-owner is queued and processed by the execution owner',
   const second = runtime({}, first.store, 1000); second.api.requestClearActivity();
   assert.equal(first.state().entries.pending.status, 'eligible');
   await first.api.pump();
+  second.api.renewLease(); second.api.completeClearActivity();
   assert.equal(first.state().task.status, 'stopped'); assert.equal(first.state().entries.pending, undefined);
+});
+test('a detail page clears a stopped task without any search page', async () => {
+  const r = runtime(); r.api.start(); r.api.stop('停止', true);
+  r.state().entries.pending = { key: 'pending', status: 'review' };
+  r.location.pathname = '/job_detail/test.html'; r.api.renewLease();
+  r.api.requestClearActivity();
+  r.advance(2000); await r.api.pump();
+  assert.equal(r.state().entries.pending, undefined); assert.equal(r.state().logs.length, 0);
+  assert.equal(r.store.get('bossai.v1.clearActivityRequest'), null);
+  assert.equal(r.state().task.status, 'stopped');
+  // The temporary maintenance lease never grants permission to run jobs from detail pages.
+  r.api.renewLease(); assert.throws(() => r.api.start());
+});
+test('clear during an in-flight AI request completes without waiting for pump cleanup', async () => {
+  const r = runtime(); r.api.start();
+  r.state().entries.pending = { key: 'pending', status: 'review' };
+  r.context.BossAdapter.Adapter.prototype.cards = () => [{ jobId: 'job1', url: 'https://www.zhipin.com/job_detail/job1.html' }];
+  r.context.GM_getTabs = callback => callback({});
+  r.context.GM_openInTab = () => {
+    const cmd = r.store.get('bossai.v1.command');
+    r.store.set('bossai.v1.result.' + cmd.id, { ok: true, data: { jobId: 'job1', recruiterId: 'boss1',
+      title: '实习开发', city: '北京', employmentType: '实习', description: '测试岗位' } });
+    return { closed: false, close() { this.closed = true; } };
+  };
+  let aiPending = false;
+  r.context.GM_xmlhttpRequest = () => { aiPending = true; return { abort() {} }; };
+  const pending = r.api.pump();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(aiPending, true);
+  r.api.requestClearActivity();
+  // Still in the same call stack: the previous pump's finally has not run yet.
+  assert.equal(r.store.get('bossai.v1.clearActivityRequest'), null);
+  assert.equal(r.state().entries.pending, undefined); assert.equal(r.state().logs.length, 0);
+  await pending;
+  assert.equal(r.state().task.status, 'stopped'); assert.equal(r.state().logs.length, 0);
+});
+test('clear during a pending start prevents that start from reviving the task', async () => {
+  const r = runtime(); const pending = r.api.requestStart();
+  r.api.requestClearActivity();
+  assert.equal(r.store.get('bossai.v1.clearActivityRequest'), null);
+  await assert.rejects(pending, /清空操作取消/);
+  assert.notEqual(r.state().task?.status, 'running');
+});
+
+test('interruption distinguishes proven pre-click stages from clicked or legacy unknown sends', () => {
+  for (const stage of ['prepared', 'opening', 'drafting', 'clicked', undefined]) {
+    const r = runtime(); r.api.start(); const s = r.state();
+    s.entries.x = { key: 'x', status: 'uncertain' }; s.outbox.push({ id: 'send', key: 'x', kind: 'contact', status: 'pending' });
+    if (stage) r.store.set('bossai.v1.sendStage.send', { stage, commandId: 'cmd' });
+    r.api.stop('选择器不匹配');
+    const before = ['prepared', 'opening', 'drafting'].includes(stage);
+    assert.equal(r.state().outbox[0].status, before ? 'not-sent' : 'uncertain');
+    assert.equal(r.state().entries.x.status, before ? 'retryable' : 'uncertain');
+    assert.ok(r.state().entries.x.note.includes('选择器不匹配'));
+  }
+});
+test('a consumed command cannot be treated as proven unsent from an older stage', () => {
+  const r = runtime(); r.api.start(); const s = r.state(); s.entries.x = { key: 'x', status: 'uncertain' };
+  s.outbox.push({ id: 'send', key: 'x', kind: 'contact', status: 'pending' });
+  r.store.set('bossai.v1.sendStage.send', { stage: 'prepared', commandId: 'cmd' }); r.store.set('bossai.v1.consumed.cmd', true);
+  r.api.stop('停止'); assert.equal(r.state().outbox[0].status, 'uncertain');
+});
+test('explicit per-job unsent confirmation requires a stopped task and preserves quotas and spacing', () => {
+  const r = runtime(); r.api.start(); r.state().task.contacts = 7; r.api.stop('停止', true);
+  const s = r.state(), lastSend = s.lastSendAt; s.entries.x = { key: 'x', status: 'uncertain', handoff: true };
+  s.outbox.push({ key: 'x', id: 'old', kind: 'contact', status: 'uncertain' });
+  r.api.approveContactRetry('x');
+  assert.equal(r.state().entries.x.status, 'review'); assert.equal(r.state().entries.x.retryApproved, true);
+  assert.equal(r.state().outbox[0].status, 'reviewed-not-sent'); assert.equal(r.state().task.contacts, 7); assert.equal(r.state().lastSendAt, lastSend);
+  r.api.start(); r.state().entries.x.status = 'uncertain'; assert.throws(() => r.api.approveContactRetry('x'), /先停止/);
+});
+test('confirmed local delivery cannot be unlocked with an unsent confirmation', () => {
+  const r = runtime(); r.api.start(); r.api.stop('停止', true); const s = r.state();
+  s.entries.x = { key: 'x', status: 'uncertain' }; s.outbox.push({ key: 'x', id: 'old', kind: 'contact', status: 'sent' });
+  assert.throws(() => r.api.approveContactRetry('x'), /禁止重复/);
+});
+test('existing AI greeting is recorded as a duplicate rather than an unknown delivery', () => {
+  const r = runtime(); r.api.start(); const s = r.state(); s.entries.x = { key: 'x', status: 'uncertain' };
+  const item = { id: 'old', key: 'x', kind: 'contact', payload: {} }; s.outbox.push(item);
+  r.api.settle(s, item, { confirmed: false, priorAI: true, reason: '已存在AI标注' });
+  assert.equal(item.status, 'duplicate'); assert.equal(s.entries.x.status, 'contacted');
 });
