@@ -1,6 +1,6 @@
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.17';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.19';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -242,7 +242,7 @@
   async function analyze(c, job) {
     const result = C.scoredAnalysis(await requestAI(c, systemBase + C.scoringPrompt + '返回 {"scoreBreakdown":{"skills":数字,"experience":数字,"requirements":数字,"preferences":数字,"bonus":数字},"hasBonusRequirements":布尔值,"suitable":布尔值,"uncertain":布尔值,"reason":"分项依据与主要扣分理由","doubts":["疑点"],"greeting":"招呼及真实经历介绍","greetingEvidence":["简历原文逐字摘录"]}。信息不足时如实列出疑点，但 suitable 和 uncertain 仅供参考，不参与发送拦截；职位通过地域及实习条件后，只按脚本加总的 score 是否达到用户阈值决定是否进入发送队列。无论评分与标记如何，都必须生成有正文的非空招呼，不得因疑点拒绝生成。招呼优先100到180字：表达岗位意向，介绍1到2项与核心工作相关的真实个人经历，写清做过什么、使用的技术及实际承担的内容，最后表达沟通意愿。没有项目经历就介绍已有技能或学习经历，不虚构项目、工作年限、职责、规模、成果数字或技能熟练度，不把AI辅助编程扩写成模型训练或Agent/RAG工程经验。greetingEvidence返回1到3条简历中逐字存在的依据，每条4到200字，必须支持招呼中的经历介绍。招呼不得出现个人姓名、联系方式、面试确认或薪资承诺。',
       { resume: c.resume, preferences: c.preferences, screeningInstructions: c.screeningPrompt, greetingInstructions: c.greetingPrompt, job: jobForAI(job) }, '职位分析'), c.resume);
-    result.greeting = C.anonymousMessage(result.greeting, c.resume, job); return result;
+    result.greeting = C.greetingMessage(result.greeting, c.resume, job); return result;
   }
   async function chatDecision(c, entry, history) {
     const lastOutgoing = history.findLastIndex(m => m.role === 'candidate');
@@ -313,7 +313,7 @@
     log(s, item.kind === 'contact' ? '已确认首条招呼发送' : item.kind === 'resume' ? '已确认附件简历发送' : '已确认回复发送');
   }
   async function dispatchEntry(entry, kind, payload, taskId) {
-    if (kind === 'contact' || kind === 'reply') payload = { ...payload, text: C.anonymousMessage(payload.text, config().resume, entry.job) };
+    if (kind === 'contact' || kind === 'reply') payload = { ...payload, text: (kind === 'contact' ? C.greetingMessage : C.anonymousMessage)(payload.text, config().resume, entry.job) };
     const c = config(), s = state();
     if (!still(taskId) || !C.canSend(s, c, Date.now(), kind, s.entries[entry.key])) return false;
     if (kind === 'resume' && (!c.profile.verifiedResume || !c.resumeName.trim())) throw new Error('尚未校准附件发送或未指定简历，已暂停');
@@ -477,14 +477,14 @@
     put('result.' + cmd.id, error ? { ok: false, error } : { ok: true, data });
     closeWorkerSelf();
   }
-  async function verifyReceipt(adapter, cmd, before, text, resumeName) {
+  async function verifyReceipt(adapter, cmd, before, resumeName) {
     for (let i = 0; i < 12; i++) {
       await sleep(400); workerGuard(cmd, true); adapter.assertIdentity(cmd.args.job);
       const history = adapter.history(cmd.args.job);
       if (resumeName) {
         const receipts = adapter.nodes(adapter.p.resumeReceipt).filter(n => (n.innerText || '').includes(resumeName));
         if (receipts.length > before) return true;
-      } else if (history.filter(m => m.role === 'candidate' && m.text === text).length > before) return true;
+      } else if (history.some(m => C.isAIOutgoing(m) && !before.includes(m.id))) return true;
     }
     return false;
   }
@@ -573,13 +573,13 @@
         const send = adapter.button(adapter.p.resumeSend, adapter.one(adapter.p.resumeDialog));
         const before = adapter.nodes(adapter.p.resumeReceipt).filter(n => (n.innerText || '').includes(cmd.args.resumeName)).length;
         sendStage(cmd, 'clicked'); put('consumed.' + cmd.id, true); workerGuard(cmd, true); send.click();
-        const confirmed = await verifyReceipt(adapter, cmd, before, '', cmd.args.resumeName);
+        const confirmed = await verifyReceipt(adapter, cmd, before, cmd.args.resumeName);
         if (confirmed) sendStage(cmd, 'confirmed');
         workerFinish(cmd, { confirmed, reason: confirmed ? '' : '附件发送回执未确认' }); return;
       }
-      const text = C.anonymousMessage(cmd.args.text, c.resume, job);
+      const text = (cmd.type === 'contact' ? C.greetingMessage : C.anonymousMessage)(cmd.args.text, c.resume, job);
       if (!text || C.sensitive(text)) throw new Error('消息为空或涉及关键事项');
-      const before = history.filter(m => m.role === 'candidate' && m.text === text).length;
+      const before = history.map(m => m.id);
       sendStage(cmd, 'drafting');
       adapter.fill(text); await sleep(150);
       // Allow a bounded UI render delay; never rewrite the draft or retry a send.
@@ -591,7 +591,7 @@
       if (!adapter.editorMatches(text)) throw new Error('输入框内容与拟发送消息不一致，取消发送（已等待编辑器同步，草稿保留；请核对换行或网页是否改写内容）');
       const send = adapter.button(adapter.p.send);
       sendStage(cmd, 'clicked'); put('consumed.' + cmd.id, true); workerGuard(cmd, true); send.click();
-      const confirmed = await verifyReceipt(adapter, cmd, before, text);
+      const confirmed = await verifyReceipt(adapter, cmd, before);
       if (confirmed) sendStage(cmd, 'confirmed');
       workerFinish(cmd, { confirmed, reason: confirmed ? '' : '消息发送回执未确认' });
     } catch (e) { workerFinish(cmd, null, e.message); }
@@ -749,7 +749,7 @@
         entry.analysis ? entry.analysis.scoreBreakdown && [1, 2].includes(entry.analysis.scoringVersion) ? '评分构成' + (entry.analysis.scoringVersion === 1 ? '（旧权重）' : '') + '：' + C.SCORING.map(x => x.label + ' ' + entry.analysis.scoreBreakdown[x.key] + '/' + scoreMaxima[x.key]).join('；') + (entry.analysis.hasBonusRequirements ? '' : '（岗位无加分条款，末项中性计分）') : '评分方式：旧版综合评分，未应用分项权重' : '',
         entry.analysis?.reason, entry.analysis?.doubts?.join('；'), entry.note,
         entry.pendingReply ? '排队中：' + (entry.pendingReply.kind === 'resume' ? '发送指定附件简历' : C.anonymousMessage(entry.pendingReply.payload.text, c.resume, entry.job)) : '',
-        entry.analysis?.greeting ? '招呼预览：' + C.anonymousMessage(entry.analysis.greeting, c.resume, entry.job) : '']) {
+        entry.analysis?.greeting ? '招呼预览：' + C.greetingMessage(entry.analysis.greeting, c.resume, entry.job) : '']) {
         if (!text) continue; const p = document.createElement('p'); p.textContent = text; el.append(p);
       }
       if (['uncertain', 'retryable'].includes(entry.status)) {

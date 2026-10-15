@@ -2,6 +2,22 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const C = require('../src/core.js');
 const now = Date.parse('2026-10-14T02:00:00Z');
+test('greetings append the project URL once before the AI notice', () => {
+  const greeting = C.greetingMessage('您好，我做过实际项目');
+  assert.ok(greeting.includes(C.PROJECT_URL)); assert.ok(greeting.endsWith(C.AI_NOTICE));
+  assert.ok(greeting.includes('这是一个基于大模型的求职助手，可分析岗位匹配度并自动发送个性化招呼。'));
+  assert.equal(C.greetingMessage(greeting), greeting);
+  assert.equal(C.greetingMessage(''), '');
+  const legacy = C.greetingMessage('您好\n自动发送项目：' + C.PROJECT_URL + '\n' + C.AI_NOTICE);
+  assert.ok(legacy.includes('这是一个基于大模型的求职助手'));
+  assert.equal(legacy.split(C.PROJECT_URL).length - 1, 1);
+  assert.equal(C.greetingMessage(legacy), legacy);
+});
+test('AI receipt keyword requires an outgoing text message', () => {
+  assert.equal(C.isAIOutgoing({ role: 'candidate', text: '与草稿不同 AI' }), true);
+  assert.equal(C.isAIOutgoing({ role: 'recruiter', text: 'AI' }), false);
+  assert.equal(C.isAIOutgoing({ role: 'candidate', text: '普通消息' }), false);
+});
 const setup = () => {
   const c = { ...C.defaults(), autoSend: true }, s = C.emptyState();
   s.task = C.createTask(c, now);

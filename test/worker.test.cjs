@@ -31,7 +31,7 @@ async function run(options = {}) {
     text() { return options.ambiguousResume ? '另一份简历' : c.resumeName; }
     button(selector) { return { click() {
       events.push(selector);
-      if (selector === 'send') history.push({ id: 'out1', role: 'candidate', text: draft });
+      if (selector === 'send' && !options.noReceipt) history.push({ id: 'out1', role: options.receiptRole || 'candidate', text: options.receiptText ?? draft });
     } }; }
     fill(text) {
       draft = text;
@@ -78,7 +78,24 @@ test('worker sends a single custom greeting to a verified empty conversation', a
   const { events, result, history } = await run(); assert.equal(result.ok, true); assert.equal(result.data.confirmed, true);
   assert.equal(events.filter(x => x === 'send').length, 1);
   assert.ok(history.at(-1).text.endsWith(C.AI_NOTICE));
+  assert.ok(history.at(-1).text.includes(C.PROJECT_URL));
   assert.ok(events.includes('closeWorker'));
+});
+
+test('new outgoing AI keyword confirms despite changed wording or formatting', async () => {
+  const { events, result } = await run({ receiptText: '网页改写后的招呼 AI' });
+  assert.equal(result.data.confirmed, true);
+  assert.equal(events.filter(e => e === 'send').length, 1);
+});
+
+test('old AI messages, incoming AI messages and messages without AI cannot confirm this send', async () => {
+  for (const options of [{ noReceipt: true }, { receiptText: '普通消息' }, { receiptText: '招聘者说 AI', receiptRole: 'recruiter' }]) {
+    const { result } = await run({ type: 'reply', history: [
+      { id: 'oldAI', role: 'candidate', text: '之前的 AI 消息' },
+      { id: 'in1', role: 'recruiter', text: '请介绍项目经验' }
+    ], ...options });
+    assert.equal(result.data.confirmed, false);
+  }
 });
 
 test('worker passes the explicit identity opt-out to drafting and receipt checks', async () => {
@@ -99,6 +116,7 @@ test('reading a conversation closes the worker after returning data', async () =
 test('worker adds disclosure to a queued legacy reply that has no marker', async () => {
   const { result, history } = await run({ type: 'reply', history: [{ id: 'in1', role: 'recruiter', text: '你有什么项目经验', rich: false }] });
   assert.equal(result.data.confirmed, true); assert.ok(history.at(-1).text.endsWith(C.AI_NOTICE));
+  assert.equal(history.at(-1).text.includes(C.PROJECT_URL), false);
 });
 test('platform default greeting blocks an extra custom greeting', async () => {
   const { events, result } = await run({ history: [{ id: 'old', role: 'candidate', text: '平台默认招呼' }] });

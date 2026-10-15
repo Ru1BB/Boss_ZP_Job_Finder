@@ -34,6 +34,7 @@
   });
   const fail = message => { throw new Error(message); };
   const AI_NOTICE = '（本消息由 AI 发送）';
+  const PROJECT_URL = 'https://github.com/Ru1BB/Boss_ZP_Job_Finder';
   function aiMessage(text) {
     let body = String(text || '').trim();
     if (!body) return '';
@@ -46,6 +47,18 @@
     for (const name of names) body = body.split(name).join('我');
     if (job.recruiterName?.trim()) body = body.split(job.recruiterName.trim()).join('您');
     return aiMessage(body);
+  }
+  function greetingMessage(text, resume = '', job = {}) {
+    let body = anonymousMessage(text, resume, job);
+    if (!body) return '';
+    body = body.slice(0, -AI_NOTICE.length).trimEnd();
+    const introduction = '这是一个基于大模型的求职助手，可分析岗位匹配度并自动发送个性化招呼。';
+    if (!body.includes(introduction)) body += '\n' + introduction;
+    if (!body.includes(PROJECT_URL)) body += '\n自动发送项目：' + PROJECT_URL;
+    return aiMessage(body);
+  }
+  function isAIOutgoing(message) {
+    return message?.role === 'candidate' && typeof message.text === 'string' && message.text.includes('AI');
   }
   function fixedConfig(raw = {}) {
     const provider = raw.provider ?? 'qwen';
@@ -235,6 +248,6 @@
   function leaseWinner(claims, now) {
     return claims.filter(c => c && c.expires > now).sort((a, b) => a.claimedAt - b.claimedAt || a.owner.localeCompare(b.owner))[0]?.owner ?? null;
   }
-  return { AI_NOTICE, aiMessage, anonymousMessage, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, parseJSON, analysis, reply, pair,
+  return { AI_NOTICE, PROJECT_URL, aiMessage, anonymousMessage, greetingMessage, isAIOutgoing, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, parseJSON, analysis, reply, pair,
     sensitive, wantsResume, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner };
 });
