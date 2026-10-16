@@ -146,7 +146,7 @@
     if (!x.greeting) fail('AI 招呼语缺少正文');
     return x;
   }
-  function scoredAnalysis(raw, resume = '') {
+  function scoredAnalysis(raw, resume = '', options = {}) {
     const x = typeof raw === 'string' ? parseJSON(raw) : raw;
     const parts = x?.scoreBreakdown;
     if (!x || typeof x !== 'object' || Array.isArray(x) || typeof x.hasBonusRequirements !== 'boolean' ||
@@ -156,8 +156,19 @@
       if (!Number.isFinite(parts[key]) || parts[key] < 0 || parts[key] > max) fail('AI 分项评分超出范围：' + key);
       scoreBreakdown[key] = key === 'bonus' && !x.hasBonusRequirements ? max : parts[key];
     }
-    if (!Array.isArray(x.greetingEvidence) || !x.greetingEvidence.length || x.greetingEvidence.length > 3 ||
-      !x.greetingEvidence.every(e => typeof e === 'string' && e.trim().length >= 4 && e.length <= 200 && (!resume || resume.includes(e.trim())))) fail('AI 招呼缺少可核对的简历原文依据');
+    const validEvidence = Array.isArray(x.greetingEvidence) && x.greetingEvidence.length > 0 && x.greetingEvidence.length <= 3 &&
+      x.greetingEvidence.every(e => typeof e === 'string' && e.trim().length >= 4 && e.length <= 200 && (!resume || resume.includes(e.trim())));
+    if (!validEvidence) {
+      if (!options.recoverEvidence) fail('AI 招呼缺少可核对的简历原文依据');
+      // Discard unsupported generated claims; quote a bounded resume fact instead.
+      const fact = resume.split(/[\r\n]+/).map(s => s.trim()).find(s =>
+        s.length >= 4 && s.length <= 140 && /开发|编程|Python|算法|测试|项目经验/.test(s) &&
+        !/姓名|电话|邮箱|https?:|@|不得|不属于|尚未|简历自述|回答.*边界|^【|^求职/.test(s));
+      x.greeting = fact ? '您好，我对该岗位感兴趣。简历中的一项经历或技能是：“' + fact + '”。希望结合实际经历进一步沟通岗位匹配情况。' :
+        '您好，我对该岗位感兴趣，希望进一步了解工作内容，并结合本人实际经历沟通岗位匹配情况。';
+      x.greetingEvidence = fact ? [fact] : []; x.evidenceRecovered = true;
+      if (Array.isArray(x.doubts)) x.doubts.push('模型招呼原文依据不足，已改用真实简历片段或中性招呼，不代表具有直接相关经验');
+    }
     const score = Math.round(Object.values(scoreBreakdown).reduce((sum, value) => sum + value, 0) * 10) / 10;
     return analysis({ ...x, scoreBreakdown, score, scoringVersion: 2, scoreMaxima: Object.fromEntries(SCORING.map(({ key, max }) => [key, max])) });
   }

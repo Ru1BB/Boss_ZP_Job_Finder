@@ -22,6 +22,116 @@ function runtime(overrides = {}, shared = null, clockOffset = 0) {
   api.renewLease(); now += 2000; api.renewLease();
   return { api, store, c, location, context, advance(ms) { now += ms; api.renewLease(); }, state() { return store.get('bossai.v1.state'); } };
 }
+
+function quickRetryTimers(r) {
+  r.context.setTimeout = (fn, ms) => setTimeout(fn, ms === 1000 || ms === 2000 ? 0 : ms);
+}
+function modelResult() {
+  return { scoreBreakdown: { skills: 27, experience: 17, requirements: 18, preferences: 18, bonus: 0 }, hasBonusRequirements: true,
+    suitable: true, uncertain: false, reason: '匹配', doubts: [], greeting: '您好，我开发过前端项目', greetingEvidence: ['开发过前端项目'] };
+}
+function respondAI(args, value) {
+  queueMicrotask(() => args.onload({ status: 200, responseText: JSON.stringify({ choices: [{ message: { content: typeof value === 'string' ? value : JSON.stringify(value) } }] }) }));
+}
+function workerStub(r, respond) {
+  r.context.GM_getTabs = callback => callback({});
+  r.context.GM_openInTab = () => {
+    const cmd = r.store.get('bossai.v1.command');
+    r.store.set('bossai.v1.result.' + cmd.id, respond(cmd));
+    return { closed: false, close() { this.closed = true; } };
+  };
+}
+function chatEntry(r, id) {
+  const job = { jobId: id, recruiterId: 'boss-' + id, url: 'https://www.zhipin.com/job_detail/' + id + '.html' };
+  const key = C.pair(job), entry = { key, job, status: 'contacted' };
+  r.state().entries[key] = entry; return entry;
+}
+
+test('AI retries transport, JSON and score failures up to three total attempts', async () => {
+  for (const failure of ['transport', 'json', 'score']) {
+    const r = runtime(); quickRetryTimers(r); let calls = 0;
+    r.context.GM_xmlhttpRequest = args => {
+      calls++;
+      assert.ok(JSON.parse(args.data).messages[0].content.includes('严格只输出一个完整的合法 JSON 对象'));
+      if (calls < 3 && failure === 'transport') queueMicrotask(() => args.onerror({ status: 503 }));
+      else respondAI(args, calls < 3 ? failure === 'json' ? '{broken' : { ...modelResult(), scoreBreakdown: {} } : modelResult());
+      return { abort() {} };
+    };
+    assert.equal((await r.api.analyze(r.c, { jobId: 'j' })).score, 80); assert.equal(calls, 3);
+  }
+});
+
+test('bad greeting evidence recovers in one AI call without stopping the task', async () => {
+  const r = runtime(); r.api.start(); let calls = 0;
+  r.context.GM_xmlhttpRequest = args => { calls++; respondAI(args, { ...modelResult(), greeting: '虚构训练经验', greetingEvidence: [] }); return { abort() {} }; };
+  const result = await r.api.analyze(r.c, { jobId: 'j' });
+  assert.equal(calls, 1); assert.equal(result.evidenceRecovered, true); assert.equal(result.greeting.includes('虚构训练经验'), false);
+  assert.equal(r.state().task.status, 'running');
+});
+
+test('three invalid AI responses stop the task instead of endlessly skipping every job', async () => {
+  const r = runtime(); quickRetryTimers(r); r.api.start(); let calls = 0;
+  r.context.BossAdapter.Adapter.prototype.cards = () => [{ jobId: 'j', url: 'https://www.zhipin.com/job_detail/j.html' }];
+  workerStub(r, () => ({ ok: true, data: { jobId: 'j', recruiterId: 'r', city: '北京', employmentType: '实习', title: '开发实习' } }));
+  r.context.GM_xmlhttpRequest = args => { calls++; respondAI(args, '{broken'); return { abort() {} }; };
+  await r.api.pump(); assert.equal(calls, 3); assert.equal(r.state().task.status, 'paused');
+  assert.ok(r.state().logs.some(x => x.message.includes('连续尝试3次失败')));
+});
+
+test('manual stop after a failed AI call prevents subsequent retry requests', async () => {
+  const r = runtime(); quickRetryTimers(r); r.api.start(); let calls = 0;
+  r.context.GM_xmlhttpRequest = args => { calls++; queueMicrotask(() => { args.onerror({ status: 503 }); r.api.stop('用户停止', true); }); return { abort() {} }; };
+  await assert.rejects(r.api.analyze(r.c, { jobId: 'j' })); assert.equal(calls, 1);
+});
+
+test('bad chat history quarantines only that conversation and the next conversation is processed', async () => {
+  const r = runtime({ autoSend: true }); r.api.start(); const first = chatEntry(r, 'first'), second = chatEntry(r, 'second'); const read = [];
+  workerStub(r, cmd => { read.push(cmd.args.job.jobId); return cmd.args.job.jobId === 'first' ? { ok: false, error: '消息缺少唯一 ID 或 ID 重复' } : { ok: true, data: [] }; });
+  await r.api.pump(); assert.equal(r.state().task.status, 'running'); assert.equal(r.state().entries[first.key].handoff, true);
+  r.advance(61000); r.advance(2000); await r.api.pump();
+  assert.deepEqual(read, ['first', 'second']); assert.equal(r.state().entries[second.key].handoff, undefined);
+});
+
+test('uncalibrated attachment is skipped without consuming quota or stopping the task', async () => {
+  const r = runtime({ autoSend: true }); r.api.start(); const entry = chatEntry(r, 'resume');
+  entry.pendingReply = { kind: 'resume', payload: { resumeName: '测试.pdf' } };
+  await r.api.pump(); assert.equal(r.state().task.status, 'running');
+  assert.equal(r.state().entries[entry.key].handoff, true); assert.equal(r.state().entries[entry.key].pendingReply, undefined);
+  assert.equal(r.state().outbox.length, 0);
+});
+
+test('a failed clicked send remains uncertain and is not retried while the task continues', async () => {
+  const r = runtime({ autoSend: true }); r.api.start(); const entry = chatEntry(r, 'send');
+  entry.pendingReply = { kind: 'reply', payload: { text: '您好' } }; let calls = 0;
+  workerStub(r, cmd => { calls++; r.store.set('bossai.v1.sendStage.' + cmd.sendId, { stage: 'clicked', commandId: cmd.id });
+    r.store.set('bossai.v1.consumed.' + cmd.id, true); return { ok: false, error: '无法判别消息方向，已停止该会话' }; });
+  await r.api.pump(); assert.equal(r.state().task.status, 'running'); assert.equal(r.state().outbox[0].status, 'uncertain');
+  assert.equal(r.state().entries[entry.key].handoff, true); assert.equal(calls, 1);
+});
+
+test('login and platform restrictions still stop globally even inside a chat action', async () => {
+  const r = runtime({ autoSend: true }); r.api.start(); chatEntry(r, 'blocked');
+  workerStub(r, () => ({ ok: false, error: '检测到登录、验证或平台限制，请手动处理后重新启动' }));
+  await r.api.pump(); assert.equal(r.state().task.status, 'paused');
+});
+test('an unreadable job is marked visited and later jobs are still inspected', async () => {
+  const r = runtime(); r.api.start(); const seen = [];
+  r.context.BossAdapter.Adapter.prototype.cards = () => ['first', 'second'].map(jobId => ({ jobId, url: 'https://www.zhipin.com/job_detail/' + jobId + '.html' }));
+  workerStub(r, cmd => { seen.push(cmd.args.job.jobId); return { ok: false, error: '职位详情未加载或选择器不匹配' }; });
+  await r.api.pump(); assert.equal(r.state().task.status, 'running'); assert.ok(r.state().task.visited.includes('first'));
+  r.advance(61000); r.advance(2000); await r.api.pump();
+  await r.api.pump(); assert.deepEqual(seen, ['first', 'second']);
+});
+
+test('an attachment selection failure is isolated after reservation', async () => {
+  const r = runtime({ autoSend: true, resumeName: '指定.pdf', profile: { verifiedResume: true } }); r.api.start();
+  const entry = chatEntry(r, 'resume-worker'); entry.pendingReply = { kind: 'resume', payload: { resumeName: '指定.pdf' } };
+  workerStub(r, () => ({ ok: false, error: '无法唯一识别指定简历' }));
+  await r.api.pump(); assert.equal(r.state().task.status, 'running');
+  assert.equal(r.state().entries[entry.key].handoff, true); assert.equal(r.state().entries[entry.key].pendingReply, undefined);
+  assert.equal(r.state().outbox[0].status, 'not-sent');
+});
+
 test('manual stop blocks scheduler restart for the same Beijing time window', async () => {
   const r = runtime({ scheduleEnabled: true, startTime: '09:00', stopTime: '18:00' });
   r.api.start(); const id = r.state().task.id;

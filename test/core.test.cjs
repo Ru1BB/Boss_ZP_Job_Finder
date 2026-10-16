@@ -176,6 +176,18 @@ function scoredJob(parts = {}, extra = {}) {
   return { suitable: true, uncertain: false, reason: '核心要求匹配，加分经历尚未证实。', doubts: [], greeting: '您好，我对该岗位感兴趣',
     greetingEvidence: ['开发过前端项目'], hasBonusRequirements: true, scoreBreakdown: { skills: 27, experience: 17, requirements: 18, preferences: 18, bonus: 0, ...parts }, ...extra };
 }
+
+test('evidence recovery discards unsupported claims and quotes a real transferable fact', () => {
+  const resume = '姓名：测试\n熟悉 Python，开发过运动数据处理项目。';
+  const recovered = C.scoredAnalysis(scoredJob({}, { greeting: '我有十年生产训练经验', greetingEvidence: ['虚构经历'] }), resume, { recoverEvidence: true });
+  assert.equal(recovered.evidenceRecovered, true);
+  assert.ok(recovered.greeting.includes('熟悉 Python，开发过运动数据处理项目。'));
+  assert.equal(recovered.greeting.includes('十年'), false);
+  assert.equal(recovered.score, 80);
+  const neutral = C.scoredAnalysis(scoredJob({}, { greetingEvidence: [] }), '姓名：测试', { recoverEvidence: true });
+  assert.equal(neutral.greetingEvidence.length, 0); assert.ok(neutral.greeting.includes('进一步了解工作内容'));
+  assert.throws(() => C.scoredAnalysis(scoredJob({ skills: 999 }, { greetingEvidence: [] }), resume, { recoverEvidence: true }), /评分超出/);
+});
 test('weighted job score is calculated by code and optional conditions contribute at most ten points', () => {
   assert.equal(C.SCORING.reduce((sum, part) => sum + part.max, 0), 100);
   assert.deepEqual(C.SCORING.map(part => part.max), [30, 20, 20, 20, 10]);
