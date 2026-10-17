@@ -31,6 +31,7 @@
     refreshMinSeconds: 10, refreshMaxSeconds: 60, maxReplies: 5,
     scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false, verifyChatWindow: true,
     openRejected: true, verifiedEmptyContact: false,
+    switchCategoryOnExhausted: true,
     resumeName: '', internshipOnly: true, requiredCity: '北京', profile: {}
   });
   const fail = message => { throw new Error(message); };
@@ -67,6 +68,7 @@
     const provider = raw.provider ?? 'qwen';
     if (!Object.hasOwn(PROVIDERS, provider)) fail('不支持的供应商');
     const preset = PROVIDERS[provider], c = { ...defaults(), ...raw, ...preset, provider };
+    delete c.categoryLabels; // Retire the old manually entered category list.
     // Do not carry credentials from a previously configured different service to a new destination.
     if (raw.baseUrl && raw.baseUrl !== preset.baseUrl) { c.apiKey = ''; c.autoSend = false; }
     return c;
@@ -76,7 +78,7 @@
     for (const key of ['baseUrl', 'model', 'apiKey', 'resume', 'preferences', 'screeningPrompt', 'greetingPrompt', 'resumeName', 'requiredCity']) {
       if (typeof c[key] !== 'string') fail(`配置 ${key} 必须是文字`);
     }
-    for (const key of ['autoSend', 'verifyChatWindow', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
+    for (const key of ['autoSend', 'verifyChatWindow', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact', 'switchCategoryOnExhausted']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
     for (const [key, min, max] of [['threshold', 0, 100], ['maxContacts', 1, 500],
       ['sendIntervalSeconds', 1, 86400], ['refreshMinSeconds', 1, 3600],
       ['refreshMaxSeconds', 1, 3600], ['maxReplies', 1, 100], ['aiTimeoutSeconds', 30, 600]]) {

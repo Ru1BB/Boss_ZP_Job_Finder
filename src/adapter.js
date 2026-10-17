@@ -6,6 +6,8 @@
     firstContactOpensEmptyChat: false,
     card: '.job-card-wrapper, .job-card-box', cardLink: 'a[href*="/job_detail/"]',
     nextPage: '.options-pages .next, .pagination-next', endMarker: '.job-list-empty',
+    categoryLink: 'a[href="javascript:;"]',
+    categoryRoot: '.c-expect-select',
     detail: '.job-detail-section .job-sec-text, .job-sec-text', title: '.job-banner .name h1, .job-name',
     employmentType: '.job-banner .job-status, .job-banner .job-type', city: '.job-banner .text-city, .job-banner .job-area',
     salary: '.job-banner .salary',
@@ -328,6 +330,72 @@
         messageSummary: { visibleRows: visibleMessages.length, ignoredSystemCards: ignoredCards, conversationRows: visibleMessages.length - ignoredCards },
         chat,
         warning: '诊断只读取页面，不证明立即沟通是否自动发送招呼。verified 标记必须在人工验证流程后设置。' };
+    }
+    categoryName(node) {
+      const values = [node.getAttribute('title'), node.getAttribute('aria-label'),
+        node.textContent, node.innerText].map(value => this.normalizeField(value)).filter(Boolean);
+      return values.find(value => !/(?:\.{3}|…)/.test(value)) || values[0] || '';
+    }
+    categoryChoices(config = {}) {
+      const roots = this.nodes(this.p.categoryRoot);
+      if (roots.length > 1) throw new Error('岗位类别容器不唯一，跳过自动切换');
+      const eligible = label => label === '推荐' || /^[^()]+\([^()]+\)$/.test(label);
+      // Overflow entries stay in this scoped DOM even while their dropdown is hidden.
+      // Do not use nodes() here: its visibility filter would discard those entries.
+      const raw = roots.length ? [...roots[0].querySelectorAll('a, li, [role="menuitem"], .expect-item, span, div')]
+        .map(node => ({ node, label: this.categoryName(node) })).filter(item => eligible(item.label)) : null;
+      const links = raw ? raw.filter(item => !raw.some(child => child !== item && child.label === item.label && item.node.contains(child.node))) :
+        this.nodes(this.p.categoryLink).map(node => ({ node, label: this.categoryName(node) }));
+      let choices;
+      if (raw) choices = links;
+      else {
+        const recommended = links.filter(item => item.label === '推荐');
+        if (!recommended.length) return [];
+        const row = recommended[0].node.getBoundingClientRect();
+        choices = links.filter(item => {
+          const rect = item.node.getBoundingClientRect();
+          return Math.abs(rect.top - row.top) < Math.max(16, row.height) &&
+            eligible(item.label);
+        });
+      }
+      const selected = node => [node, node.parentElement, node.closest?.('a, .expect-item, [role="menuitem"], li')].filter(Boolean).some(n =>
+        n.getAttribute('aria-selected') === 'true' || ['page', 'true'].includes(n.getAttribute('aria-current')) ||
+        ['active', 'selected', 'current'].some(name => n.classList?.contains(name)));
+      const groups = new Map();
+      for (const item of choices) {
+        if (!groups.has(item.label)) groups.set(item.label, []);
+        groups.get(item.label).push({ ...item, active: selected(item.node), visible: item.node.getClientRects ? item.node.getClientRects().length > 0 : true });
+      }
+      // Responsive top tabs and the overflow menu may render the same category twice.
+      // Keep one logical category in page order; click an active/visible copy first.
+      return [...groups.values()].map(copies => ({
+        ...(copies.find(item => item.active && item.visible) || copies.find(item => item.visible) || copies[0]),
+        active: copies.some(item => item.active), copies: copies.length
+      }));
+    }
+    categoryFingerprint() { return this.cards().map(job => job.jobId).sort().join('|'); }
+    planCategory(config, lastCategory = '') {
+      const choices = this.categoryChoices(config);
+      if (choices.length < 2) return null;
+      const active = choices.filter(item => item.active);
+      if (active.length > 1) throw new Error('岗位类别选中状态冲突，跳过自动切换');
+      const current = active[0]?.label || lastCategory;
+      const index = choices.findIndex(item => item.label === current);
+      return { label: choices[(index + 1) % choices.length].label, before: this.categoryFingerprint() };
+    }
+    clickCategory(label, config) {
+      this.health();
+      const matches = this.categoryChoices(config).filter(item => item.label === label);
+      if (matches.length !== 1) throw new Error('未找到唯一岗位类别入口，跳过自动切换');
+      const href = matches[0].node.getAttribute('href');
+      if (href && !/^javascript:\s*;?$/i.test(href) && this.safeUrl(href).pathname !== '/web/geek/jobs') throw new Error('岗位类别入口不是搜索页，跳过切换');
+      matches[0].node.click();
+    }
+    categoryChanged(pending, config) {
+      const active = this.categoryChoices(config).filter(item => item.active);
+      if (active.length === 1 && active[0].label === pending.label) return true;
+      const fingerprint = this.categoryFingerprint();
+      return !!fingerprint && fingerprint !== pending.before;
     }
     advance() {
       this.health();

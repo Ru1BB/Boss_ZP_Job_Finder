@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS AI 求职助手（试运行优先）
 // @namespace    local.boss-ai
-// @version      0.1.23
+// @version      0.1.27
 // @description  AI 职位筛选、受控沟通与北京时间调度；请先校准页面
 // @match        https://www.zhipin.com/*
 // @grant        GM_getValue
@@ -57,6 +57,7 @@
     refreshMinSeconds: 10, refreshMaxSeconds: 60, maxReplies: 5,
     scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false, verifyChatWindow: true,
     openRejected: true, verifiedEmptyContact: false,
+    switchCategoryOnExhausted: true,
     resumeName: '', internshipOnly: true, requiredCity: '北京', profile: {}
   });
   const fail = message => { throw new Error(message); };
@@ -93,6 +94,7 @@
     const provider = raw.provider ?? 'qwen';
     if (!Object.hasOwn(PROVIDERS, provider)) fail('不支持的供应商');
     const preset = PROVIDERS[provider], c = { ...defaults(), ...raw, ...preset, provider };
+    delete c.categoryLabels; // Retire the old manually entered category list.
     // Do not carry credentials from a previously configured different service to a new destination.
     if (raw.baseUrl && raw.baseUrl !== preset.baseUrl) { c.apiKey = ''; c.autoSend = false; }
     return c;
@@ -102,7 +104,7 @@
     for (const key of ['baseUrl', 'model', 'apiKey', 'resume', 'preferences', 'screeningPrompt', 'greetingPrompt', 'resumeName', 'requiredCity']) {
       if (typeof c[key] !== 'string') fail(`配置 ${key} 必须是文字`);
     }
-    for (const key of ['autoSend', 'verifyChatWindow', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
+    for (const key of ['autoSend', 'verifyChatWindow', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact', 'switchCategoryOnExhausted']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
     for (const [key, min, max] of [['threshold', 0, 100], ['maxContacts', 1, 500],
       ['sendIntervalSeconds', 1, 86400], ['refreshMinSeconds', 1, 3600],
       ['refreshMaxSeconds', 1, 3600], ['maxReplies', 1, 100], ['aiTimeoutSeconds', 30, 600]]) {
@@ -304,6 +306,8 @@
     firstContactOpensEmptyChat: false,
     card: '.job-card-wrapper, .job-card-box', cardLink: 'a[href*="/job_detail/"]',
     nextPage: '.options-pages .next, .pagination-next', endMarker: '.job-list-empty',
+    categoryLink: 'a[href="javascript:;"]',
+    categoryRoot: '.c-expect-select',
     detail: '.job-detail-section .job-sec-text, .job-sec-text', title: '.job-banner .name h1, .job-name',
     employmentType: '.job-banner .job-status, .job-banner .job-type', city: '.job-banner .text-city, .job-banner .job-area',
     salary: '.job-banner .salary',
@@ -627,6 +631,72 @@
         chat,
         warning: '诊断只读取页面，不证明立即沟通是否自动发送招呼。verified 标记必须在人工验证流程后设置。' };
     }
+    categoryName(node) {
+      const values = [node.getAttribute('title'), node.getAttribute('aria-label'),
+        node.textContent, node.innerText].map(value => this.normalizeField(value)).filter(Boolean);
+      return values.find(value => !/(?:\.{3}|…)/.test(value)) || values[0] || '';
+    }
+    categoryChoices(config = {}) {
+      const roots = this.nodes(this.p.categoryRoot);
+      if (roots.length > 1) throw new Error('岗位类别容器不唯一，跳过自动切换');
+      const eligible = label => label === '推荐' || /^[^()]+\([^()]+\)$/.test(label);
+      // Overflow entries stay in this scoped DOM even while their dropdown is hidden.
+      // Do not use nodes() here: its visibility filter would discard those entries.
+      const raw = roots.length ? [...roots[0].querySelectorAll('a, li, [role="menuitem"], .expect-item, span, div')]
+        .map(node => ({ node, label: this.categoryName(node) })).filter(item => eligible(item.label)) : null;
+      const links = raw ? raw.filter(item => !raw.some(child => child !== item && child.label === item.label && item.node.contains(child.node))) :
+        this.nodes(this.p.categoryLink).map(node => ({ node, label: this.categoryName(node) }));
+      let choices;
+      if (raw) choices = links;
+      else {
+        const recommended = links.filter(item => item.label === '推荐');
+        if (!recommended.length) return [];
+        const row = recommended[0].node.getBoundingClientRect();
+        choices = links.filter(item => {
+          const rect = item.node.getBoundingClientRect();
+          return Math.abs(rect.top - row.top) < Math.max(16, row.height) &&
+            eligible(item.label);
+        });
+      }
+      const selected = node => [node, node.parentElement, node.closest?.('a, .expect-item, [role="menuitem"], li')].filter(Boolean).some(n =>
+        n.getAttribute('aria-selected') === 'true' || ['page', 'true'].includes(n.getAttribute('aria-current')) ||
+        ['active', 'selected', 'current'].some(name => n.classList?.contains(name)));
+      const groups = new Map();
+      for (const item of choices) {
+        if (!groups.has(item.label)) groups.set(item.label, []);
+        groups.get(item.label).push({ ...item, active: selected(item.node), visible: item.node.getClientRects ? item.node.getClientRects().length > 0 : true });
+      }
+      // Responsive top tabs and the overflow menu may render the same category twice.
+      // Keep one logical category in page order; click an active/visible copy first.
+      return [...groups.values()].map(copies => ({
+        ...(copies.find(item => item.active && item.visible) || copies.find(item => item.visible) || copies[0]),
+        active: copies.some(item => item.active), copies: copies.length
+      }));
+    }
+    categoryFingerprint() { return this.cards().map(job => job.jobId).sort().join('|'); }
+    planCategory(config, lastCategory = '') {
+      const choices = this.categoryChoices(config);
+      if (choices.length < 2) return null;
+      const active = choices.filter(item => item.active);
+      if (active.length > 1) throw new Error('岗位类别选中状态冲突，跳过自动切换');
+      const current = active[0]?.label || lastCategory;
+      const index = choices.findIndex(item => item.label === current);
+      return { label: choices[(index + 1) % choices.length].label, before: this.categoryFingerprint() };
+    }
+    clickCategory(label, config) {
+      this.health();
+      const matches = this.categoryChoices(config).filter(item => item.label === label);
+      if (matches.length !== 1) throw new Error('未找到唯一岗位类别入口，跳过自动切换');
+      const href = matches[0].node.getAttribute('href');
+      if (href && !/^javascript:\s*;?$/i.test(href) && this.safeUrl(href).pathname !== '/web/geek/jobs') throw new Error('岗位类别入口不是搜索页，跳过切换');
+      matches[0].node.click();
+    }
+    categoryChanged(pending, config) {
+      const active = this.categoryChoices(config).filter(item => item.active);
+      if (active.length === 1 && active[0].label === pending.label) return true;
+      const fingerprint = this.categoryFingerprint();
+      return !!fingerprint && fingerprint !== pending.before;
+    }
     advance() {
       this.health();
       const next = this.nodes(this.p.nextPage);
@@ -646,7 +716,7 @@
 
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.23';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.27';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -746,6 +816,7 @@
     if (s.task?.status === 'running') throw new Error('任务正在运行，请先停止再新建任务');
     const pending = get('command'); if (pending) put('cancel.' + pending.id, true);
     s.task = C.createTask(c, Date.now(), source); s.task.searchUrl = location.href; s.task.leaseToken = owner;
+    s.task.nextChatAt = Date.now() + C.randomDelay(c); // Give the initial job scan the first turn.
     if (source === 'manual') s.blockedWindow = '';
     put('stopRequest', null); put('command', null);
     log(s, c.autoSend ? '自动任务开始' : '试运行开始：不向招聘者发送任何内容'); persist(s);
@@ -942,6 +1013,9 @@
     if (sendId) put('sendStage.' + sendId, { stage: 'prepared', commandId: id, at: Date.now() });
     put('activeWorker', { id: wid, commandId: id, createdAt: Date.now() });
     put('command', cmd);
+    const labels = { inspect: '读取职位详情', history: '检查已联系会话', contact: '发送首条招呼', reply: '发送回复', resume: '发送附件简历', openOnly: '仅打开沟通' };
+    const label = labels[type] || '页面操作';
+    const progress = state(); log(progress, '开始' + label + '，等待后台工作页'); persist(progress);
     let handle;
     try {
       const url = new URL(args.job?.url || s.task.searchUrl);
@@ -956,6 +1030,7 @@
         if (result) {
           put('command', null); GM_deleteValue(prefix + 'result.' + id);
           if (!result.ok) throw new Error(result.error);
+          const completed = state(); log(completed, label + '完成'); persist(completed);
           return result.data;
         }
         if (handle.closed) throw new Error('工作页在读取完成前已关闭，请重新启动');
@@ -1058,6 +1133,36 @@
       validSetup(c);
       const adapter = new Adapter(document, c.profile); adapter.health();
       if (!location.pathname.includes('/web/geek/jobs')) throw new Error('主标签页已离开搜索页，暂停任务');
+      if (c.switchCategoryOnExhausted && s.task.currentCategory && !s.task.categoryPending) {
+        try {
+          const choices = adapter.categoryChoices(c), active = choices.filter(item => item.active);
+          if (active.length === 1 && active[0].label !== s.task.currentCategory && choices.some(item => item.label === s.task.currentCategory)) {
+            s.task.categoryPending = { label: s.task.currentCategory, before: adapter.categoryFingerprint(), at: Date.now(), restoring: true };
+            log(s, '刷新后恢复岗位类别：' + s.task.currentCategory); persist(s);
+            adapter.clickCategory(s.task.currentCategory, c); return;
+          }
+        } catch (error) {
+          delete s.task.currentCategory; delete s.task.categoryPending;
+          log(s, '类别恢复跳过：' + error.message); persist(s);
+        }
+      }
+      if (s.task.categoryPending) {
+        const pending = s.task.categoryPending;
+        try {
+          if (Date.now() - pending.at < 1500) return;
+          if (adapter.categoryChanged(pending, c)) {
+            s.task.currentCategory = pending.label;
+            delete s.task.categoryPending; s.task.emptyRounds = 0; s.task.nextScanAt = Date.now() + C.randomDelay(c);
+            log(s, '岗位类别已切换：' + pending.label + '；保留任务计数及去重记录，等待列表加载'); persist(s); return;
+          }
+          if (Date.now() - pending.at < 15000) return;
+          throw new Error('切换后未确认选中状态或职位列表变化');
+        } catch (error) {
+          if (pending.restoring) delete s.task.currentCategory;
+          delete s.task.categoryPending; s.task.refreshWanted = true; s.task.nextScanAt = Date.now();
+          log(s, '岗位类别切换未确认，改为刷新续跑：' + error.message); persist(s); return;
+        }
+      }
       const pendingChat = Object.values(s.entries).find(e => e.pendingReply && !e.handoff && e.status === 'contacted');
       if (pendingChat && C.canSend(s, c, Date.now(), pendingChat.pendingReply.kind, pendingChat)) {
         actionContext = { key: pendingChat.key, job: pendingChat.job, kind: pendingChat.pendingReply.kind === 'resume' ? '附件发送' : '回复发送' };
@@ -1103,7 +1208,21 @@
       s = state();
       if (Date.now() < s.task.nextScanAt) return;
       if (s.task.exhausted) {
-        s.task.exhausted = false; s.task.emptyRounds = 0; s.task.refreshWanted = true;
+        s.task.exhausted = false; s.task.emptyRounds = 0;
+        if (c.switchCategoryOnExhausted) {
+          try {
+            const plan = adapter.planCategory(c, s.task.lastCategory);
+            if (plan) {
+              s.task.lastCategory = plan.label; s.task.categoryPending = { ...plan, at: Date.now() };
+              log(s, '本类别已遍历，准备切换岗位类别：' + plan.label); persist(s);
+              adapter.clickCategory(plan.label, c); return;
+            }
+            log(s, '未识别到至少两个唯一岗位类别，改为刷新当前类别');
+          } catch (error) {
+            delete s.task.categoryPending; log(s, '岗位类别切换跳过，改为刷新：' + error.message);
+          }
+        }
+        s.task.refreshWanted = true;
         log(s, '搜索结果已遍历，刷新搜索页并继续当前任务，保留计数及去重记录');
       }
       if (s.task.refreshWanted) {
@@ -1118,7 +1237,7 @@
       if (!card) {
         const result = adapter.advance();
         s.task.emptyRounds = (s.task.emptyRounds || 0) + 1;
-        if (result === 'end' || s.task.emptyRounds >= 3) { s.task.exhausted = true; log(s, '本轮搜索结果已遍历，随机等待后刷新并继续搜索'); }
+        if (result === 'end' || s.task.emptyRounds >= 3) { s.task.exhausted = true; log(s, '本轮搜索结果已遍历，随机等待后切换类别或刷新继续搜索'); }
         s.task.nextScanAt = Date.now() + C.randomDelay(c); persist(s); return;
       }
       actionContext = { job: card, kind: '职位读取' };
@@ -1147,7 +1266,13 @@
         if (actionContext && !globalFailure(e) && still(taskId)) skipAction(actionContext, e, taskId);
         else stop(e.message);
       }
-    } finally { busy = false; }
+    } finally {
+      // A slow poll must not make the next poll immediately overdue and starve scans.
+      if (actionContext?.kind === '聊天处理' && still(taskId)) {
+        const latest = state(); latest.task.nextChatAt = Date.now() + C.randomDelay(config()); persist(latest);
+      }
+      busy = false;
+    }
   }
 
   // Worker has its own tab and session identity. Only the leader may issue commands.
@@ -1352,6 +1477,8 @@
       <div class="row"><div><label><input type="checkbox" name="internshipOnly"> 只找实习（实习文本或日薪）</label></div><div><label>必需工作城市</label><input name="requiredCity" placeholder="北京"></div></div>
       <p class="muted">默认只找北京。岗位标题、类型或正文包含“实习”，或薪资明确按天计，满足任一项即按实习处理；地点不明仍转人工。</p>
       <details open><summary>运行与间隔</summary><label><input type="checkbox" name="scheduleEnabled"> 启用每日定时（北京时间）</label>
+      <label><input type="checkbox" name="switchCategoryOnExhausted"> 当前类别遍历完后切换下一个岗位类别</label>
+      <p class="muted">自动读取页面左上角及“更多”中的类别，按页面顺序点选轮换，无需输入名称；末尾轮换回第一个。顶部和折叠菜单中的同名副本合并，优先点击可见入口。不清空已读和发送记录、不重置额度，不点击新增或编辑求职期望。切换未确认时刷新续跑；仍按北京实习条件筛选。</p>
       <div class="row"><div><label>开始时间</label><input type="time" name="startTime"></div><div><label>停止时间（可跨午夜）</label><input type="time" name="stopTime"></div></div>
       <div class="row"><div><label>每次任务最多首聊次数</label><input type="number" name="maxContacts" min="1" max="500"></div><div><label>所有发送动作最小间隔 / 秒</label><input type="number" name="sendIntervalSeconds" min="1"></div></div>
       <div class="row"><div><label>随机刷新等待最小 / 秒</label><input type="number" name="refreshMinSeconds" min="1" max="3600"></div><div><label>随机刷新等待最大 / 秒</label><input type="number" name="refreshMaxSeconds" min="1" max="3600"></div></div>
@@ -1459,6 +1586,21 @@
     const url = URL.createObjectURL(new Blob([text], { type: 'application/json;charset=utf-8' }));
     const a = document.createElement('a'); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
+  function currentActivity() {
+    const s = state(), cmd = get('command');
+    if (s.task?.status !== 'running') return '';
+    if (activeRequest) return '';
+    if (s.task.categoryPending) return '当前动作：等待岗位类别切换 · ' + s.task.categoryPending.label;
+    if (cmd?.taskId === s.task.id) {
+      const labels = { inspect: '读取职位详情', history: '检查已联系会话', contact: '首聊流程', reply: '回复流程', resume: '附件流程', openOnly: '仅打开沟通' };
+      const elapsed = Math.max(0, Math.floor((Date.now() - cmd.createdAt) / 1000));
+      return `当前动作：${labels[cmd.type] || '页面操作'} · 阶段 ${cmd.phase} · 已等待${elapsed}秒 / 上限90秒` +
+        (get('workerRegistered.' + cmd.workerId) ? '' : ' · 等待后台工作页加载并注册脚本');
+    }
+    if (busy) return '当前动作：正在处理任务；若正在重试，请查看运行记录';
+    const wait = Math.max(0, Math.ceil(((s.task.nextScanAt || 0) - Date.now()) / 1000));
+    return wait ? `当前动作：等待下一轮扫描，约${wait}秒` : '当前动作：等待下一轮调度';
+  }
   function render() {
     if (!shadow) return;
     const q = id => shadow.getElementById(id), s = state(), c = config(), t = s.task;
@@ -1466,7 +1608,7 @@
     const execution = !location.pathname.includes('/web/geek/jobs') ? '请在职位搜索页启动' :
       starting ? '正在申请本页执行' : t?.status === 'running' ? owned() ? '本页执行中' : '其他标签页执行中' : '就绪，点击开始将由本页执行';
     const waiting = activeRequest ? `\n${activeRequest.purpose}请求中：已等待${Math.max(0, Math.floor((Date.now() - activeRequest.startedAt) / 1000))}秒 / 上限${activeRequest.timeoutSeconds}秒，正文约${activeRequest.inputChars}字符` : '';
-    q('status').textContent = `${execution} · ${c.autoSend ? '自动发送模式' : '试运行，不发送'} · ${c.verifyChatWindow ? '核对聊天窗口' : '不核对聊天窗口（可能发错对象）'}\n任务：${t?.status || '未启动'} · 首聊预约 ${t?.contacts || 0}/${c.maxContacts}（含待核实）\n下次刷新/扫描：${t?.exhausted ? '已遍历，等待刷新：' + fmt(t?.nextScanAt) : fmt(t?.nextScanAt)}\n停止：${fmt(t?.endAt)}\n${logMessage}${waiting}`;
+    q('status').textContent = `${execution} · ${c.autoSend ? '自动发送模式' : '试运行，不发送'} · ${c.verifyChatWindow ? '核对聊天窗口' : '不核对聊天窗口（可能发错对象）'}\n任务：${t?.status || '未启动'} · 首聊预约 ${t?.contacts || 0}/${c.maxContacts}（含待核实）\n下次刷新/扫描：${t?.exhausted ? '已遍历，等待刷新：' + fmt(t?.nextScanAt) : fmt(t?.nextScanAt)}\n停止：${fmt(t?.endAt)}\n${currentActivity()}\n${logMessage}${waiting}`;
     const entries = q('entries'); entries.replaceChildren();
     const labels = { eligible: '待发送/试运行预览', review: '待人工确认', rejected: '不匹配', existing: '已有沟通，跳过', contacted: '已联系', uncertain: '发送待核实', retryable: '发送前中断，待重新评估' };
     for (const entry of Object.values(s.entries).filter(entry => !entry.hidden).slice(-60).reverse()) {
@@ -1493,7 +1635,7 @@
     q('logs').textContent = s.logs.slice(0, 30).map(x => fmt(x.at) + ' ' + x.message).join('\n'); q('logs').style.whiteSpace = 'pre-wrap';
   }
   if (typeof module === 'object' && module.exports) {
-    module.exports = { renewLease, start, requestStart, stop, pump, analyze, testConnection, approveContactRetry, settle, chatDecision, requestAI, command, closeManagedWorker, disableAutoSend, requestClearActivity, completeClearActivity, quarantinePending }; return;
+    module.exports = { renewLease, start, requestStart, stop, pump, analyze, testConnection, approveContactRetry, settle, chatDecision, requestAI, command, closeManagedWorker, disableAutoSend, requestClearActivity, completeClearActivity, quarantinePending, currentActivity }; return;
   }
   if (workerId) {
     const banner = document.createElement('div'); banner.textContent = `AI 求职工作标签页 v${VERSION} · 请勿手动切换会话或输入消息 · 停止请在主搜索页操作`;

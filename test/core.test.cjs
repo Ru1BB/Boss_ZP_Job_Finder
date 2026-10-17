@@ -2,6 +2,10 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const C = require('../src/core.js');
 const now = Date.parse('2026-10-14T02:00:00Z');
+test('old manually entered category names are discarded during config normalization', () => {
+  assert.equal(Object.hasOwn(C.defaults(), 'categoryLabels'), false);
+  assert.equal(Object.hasOwn(C.fixedConfig({ categoryLabels: '不会存在的岗位类别' }), 'categoryLabels'), false);
+});
 test('greetings append the new introduction and URL once without a trailing AI notice', () => {
   const greeting = C.greetingMessage('您好，我做过实际项目');
   assert.ok(greeting.includes(C.PROJECT_URL)); assert.equal(greeting.endsWith(C.AI_NOTICE), false);

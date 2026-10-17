@@ -8,6 +8,7 @@ vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname, '../src/
 const { Adapter, DEFAULT_PROFILE: P } = context.BossAdapter;
 function element(attrs = {}, text = '', selectors = {}) {
   return { selectors, innerText: text, textContent: text, childNodes: [{ nodeType: 3, textContent: text }],
+    contains(other) { return this === other || Object.values(selectors).flat().includes(other); },
     getAttribute(name) { return attrs[name] || null; }, href: attrs.href };
 }
 function adapter(selectors = {}, profile = {}, options = {}) {
@@ -18,6 +19,77 @@ function adapter(selectors = {}, profile = {}, options = {}) {
   }
   return new DOMAdapter(doc, profile, [], options);
 }
+
+function categoryFixture() {
+  const clicked = [];
+  const items = ['推荐', '测试(北京)', 'Python(北京)', '更多', '公司(北京)'].map((label, i) => {
+    const node = element(i === 0 ? { 'aria-selected': 'true' } : {}, label);
+    node.getBoundingClientRect = () => ({ top: i === 4 ? 500 : 100, height: 24 });
+    node.click = () => clicked.push(label); return node;
+  });
+  const a = adapter({ [P.categoryLink]: items }); a.cards = () => [{ jobId: 'first' }];
+  return { a, items, clicked };
+}
+
+test('category rotation stays in the recommendation row and wraps without clicking more or companies', () => {
+  const { a, items, clicked } = categoryFixture(), c = { requiredCity: '北京' };
+  assert.equal(a.planCategory(c).label, '测试(北京)');
+  a.clickCategory('测试(北京)', c); assert.deepEqual(clicked, ['测试(北京)']);
+  items[0].getAttribute = () => null;
+  assert.equal(a.planCategory(c, 'Python(北京)').label, '推荐');
+  assert.equal(a.categoryChoices(c).length, 3);
+});
+
+test('categories follow page order, ignore old manual names and merge duplicate copies', () => {
+  const { a, items } = categoryFixture(); items[0].getAttribute = () => null;
+  assert.equal(a.planCategory({ categoryLabels: 'Python(北京)\n测试(北京)' }, 'Python(北京)').label, '推荐');
+  a.doc.selectors[P.categoryLink].push(items[1]);
+  assert.equal(a.categoryChoices({ requiredCity: '北京' }).length, 3);
+  assert.equal(a.categoryChoices({ requiredCity: '北京' }).find(item => item.label === '测试(北京)').copies, 2);
+});
+
+test('category transition requires an active target or changed nonempty job IDs', () => {
+  const { a } = categoryFixture(), c = { requiredCity: '北京' }, pending = { label: 'Python(北京)', before: 'first' };
+  assert.equal(a.categoryChanged(pending, c), false);
+  a.cards = () => []; assert.equal(a.categoryChanged(pending, c), false);
+  a.cards = () => [{ jobId: 'next' }]; assert.equal(a.categoryChanged(pending, c), true);
+  assert.equal(a.planCategory({ categoryLabels: '推荐' }).label, '测试(北京)');
+});
+
+test('scoped categories include hidden overflow entries and use full DOM text instead of clipped text', () => {
+  const clicked = [], rec = element({ 'aria-selected': 'true' }, '推荐');
+  const clipped = element({}, '前端/移动开…'); clipped.textContent = '前端/移动开发(北京)';
+  const hidden = element({}, '后端开发（北京）'); hidden.getClientRects = () => [];
+  clipped.click = () => clicked.push('front'); hidden.click = () => clicked.push('backend');
+  const root = { querySelectorAll: () => [rec, clipped, hidden] };
+  const a = adapter({ [P.categoryRoot]: [root] }); a.cards = () => [];
+  const c = { requiredCity: '北京' };
+  assert.deepEqual(Array.from(a.categoryChoices(c), item => item.label), ['推荐', '前端/移动开发(北京)', '后端开发(北京)']);
+  a.clickCategory('前端/移动开发(北京)', c); a.clickCategory('后端开发(北京)', c);
+  assert.deepEqual(clicked, ['front', 'backend']);
+  assert.equal(a.planCategory({ categoryLabels: '后端开发(北京)\n前端/移动开发(北京)' }, '后端开发(北京)').label, '前端/移动开发(北京)');
+});
+
+test('full title resolves a literal ellipsis and nested category text is not treated as two options', () => {
+  const rec = element({ 'aria-selected': 'true' }, '推荐');
+  const leaf = element({ title: '电子/硬件开发（北京）' }, '电子/硬件开发（北…');
+  const anchor = element({}, '电子/硬件开发（北京）', { span: [leaf] }); leaf.parentElement = anchor;
+  const root = { querySelectorAll: () => [rec, anchor, leaf] };
+  const a = adapter({ [P.categoryRoot]: [root] }); a.cards = () => [];
+  assert.equal(a.categoryChoices({ requiredCity: '北京' }).length, 2);
+  assert.equal(a.planCategory({ requiredCity: '北京' }).label, '电子/硬件开发(北京)');
+});
+
+test('top and overflow copies merge after switching, retaining active state and preferring the visible copy', () => {
+  const rec = element({}, '推荐'), top = element({}, '后端开发(北京)'), folded = element({ 'aria-selected': 'true' }, '后端开发（北京）');
+  top.getClientRects = () => [{}]; folded.getClientRects = () => []; let clicked = '';
+  top.click = () => clicked = 'top'; folded.click = () => clicked = 'folded';
+  const a = adapter({ [P.categoryRoot]: [{ querySelectorAll: () => [rec, top, folded] }] }); a.cards = () => [{ jobId: 'same' }];
+  const choices = a.categoryChoices({}); assert.equal(choices.length, 2);
+  assert.equal(choices[1].active, true); assert.equal(choices[1].copies, 2);
+  assert.equal(a.categoryChanged({ label: '后端开发(北京)', before: 'same' }, {}), true);
+  a.clickCategory('后端开发(北京)', {}); assert.equal(clicked, 'top');
+});
 const attrSelector = ['data-boss-id', 'data-bossid', 'data-boss-uid', 'data-recruiter-id', 'data-encrypt-boss-id'].map(a => '[' + a + ']').join(',');
 test('recruiter IDs can be read from alternate scoped data attributes', () => {
   const scope = element({}, '', { [attrSelector]: [element({ 'data-bossid': 'boss-123' })] });

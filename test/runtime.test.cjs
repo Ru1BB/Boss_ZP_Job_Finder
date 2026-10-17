@@ -44,8 +44,38 @@ function workerStub(r, respond) {
 function chatEntry(r, id) {
   const job = { jobId: id, recruiterId: 'boss-' + id, url: 'https://www.zhipin.com/job_detail/' + id + '.html' };
   const key = C.pair(job), entry = { key, job, status: 'contacted' };
-  r.state().entries[key] = entry; return entry;
+  r.state().entries[key] = entry; r.state().task.nextChatAt = 0; return entry;
 }
+
+test('slow chat polling schedules its next turn from completion so job scanning gets a turn', async () => {
+  const r = runtime({ autoSend: true, refreshMinSeconds: 10, refreshMaxSeconds: 15 }); r.api.start(); chatEntry(r, 'slow');
+  workerStub(r, cmd => { assert.equal(cmd.type, 'history'); r.advance(22000); r.advance(2000); return { ok: true, data: [] }; });
+  await r.api.pump();
+  assert.ok(r.state().task.nextChatAt > r.context.Date.now(), 'chat deadline must be after completion');
+  r.context.BossAdapter.Adapter.prototype.cards = () => [];
+  r.context.BossAdapter.Adapter.prototype.advance = () => 'end';
+  await r.api.pump(); assert.equal(r.state().task.exhausted, true);
+});
+
+test('starting a new task with old conversations reads a job before polling chats', async () => {
+  const r = runtime({ autoSend: true, refreshMinSeconds: 10, refreshMaxSeconds: 15 }); r.api.start(); chatEntry(r, 'old-chat');
+  r.api.stop('重新启动', true); r.api.start();
+  r.context.BossAdapter.Adapter.prototype.cards = () => [{ jobId: 'new', url: 'https://www.zhipin.com/job_detail/new.html' }];
+  const calls = [];
+  workerStub(r, cmd => { calls.push(cmd.type); return { ok: true, data: { jobId: 'new', recruiterId: 'boss-new', city: '上海', title: '实习开发', employmentType: '实习' } }; });
+  await r.api.pump(); assert.deepEqual(calls, ['inspect']); assert.equal(r.state().task.status, 'running');
+  assert.ok(r.state().logs.some(x => x.message.includes('开始读取职位详情')));
+});
+
+test('waiting status explains page registration, elapsed time and scan cooldown without private data', () => {
+  const r = runtime(); r.api.start(); const taskId = r.state().task.id;
+  r.store.set('bossai.v1.command', { taskId, type: 'inspect', workerId: 'w', phase: 'detail', createdAt: r.context.Date.now() - 5000 });
+  assert.match(r.api.currentActivity(), /读取职位详情.*5秒.*90秒.*等待后台工作页/);
+  r.store.set('bossai.v1.workerRegistered.w', true); assert.equal(r.api.currentActivity().includes('等待后台工作页加载'), false);
+  r.store.delete('bossai.v1.command'); r.state().task.nextScanAt = r.context.Date.now() + 10000;
+  assert.match(r.api.currentActivity(), /等待下一轮扫描，约10秒/);
+  r.api.stop('停止'); assert.equal(r.api.currentActivity(), '');
+});
 
 test('AI retries transport, JSON and score failures up to three total attempts', async () => {
   for (const failure of ['transport', 'json', 'score']) {
@@ -158,6 +188,53 @@ test('exhausted results refresh after random wait and resume the same task after
   await restored.api.pump();
   assert.equal(restored.state().task.status, 'running'); assert.equal(restored.state().task.id, id);
   assert.equal(restored.state().task.contacts, 7); assert.ok(restored.state().task.visited.includes('old'));
+});
+
+test('exhausted search switches category once, waits for confirmation and preserves quota and visited jobs', async () => {
+  const r = runtime(); r.api.start(); const id = r.state().task.id; let clicks = 0;
+  r.state().task.contacts = 9; r.state().task.visited.push('old'); r.state().task.exhausted = true;
+  const proto = r.context.BossAdapter.Adapter.prototype;
+  proto.planCategory = () => ({ label: 'Python(北京)', before: 'old' });
+  proto.clickCategory = () => { clicks++; assert.equal(r.state().task.categoryPending.label, 'Python(北京)'); };
+  proto.categoryChanged = () => true;
+  await r.api.pump(); assert.equal(clicks, 1); assert.equal(r.state().task.categoryPending.label, 'Python(北京)');
+  await r.api.pump(); assert.equal(clicks, 1);
+  r.advance(2000); await r.api.pump();
+  assert.equal(r.state().task.categoryPending, undefined); assert.equal(r.state().task.contacts, 9);
+  assert.equal(r.state().task.id, id); assert.ok(r.state().task.visited.includes('old'));
+  assert.equal(r.state().task.status, 'running');
+});
+
+test('unconfirmed category switching falls back to refresh without repeated clicks or stopping', async () => {
+  const r = runtime(); r.api.start(); r.state().task.exhausted = true; let clicks = 0, reloads = 0;
+  r.location.reload = () => reloads++;
+  const proto = r.context.BossAdapter.Adapter.prototype;
+  proto.planCategory = () => ({ label: '测试(北京)', before: 'old' }); proto.clickCategory = () => clicks++;
+  proto.categoryChanged = () => false;
+  await r.api.pump(); r.advance(16000); r.advance(2000); await r.api.pump();
+  assert.equal(clicks, 1); assert.equal(r.state().task.categoryPending, undefined);
+  await r.api.pump(); assert.equal(reloads, 1); assert.equal(r.state().task.status, 'running');
+});
+
+test('a persisted category transition resumes after reload and expired tasks cannot click categories', async () => {
+  const r = runtime(); r.api.start(); r.state().task.categoryPending = { label: 'Python(北京)', before: 'old', at: r.context.Date.now() };
+  const restored = runtime({}, r.store, 25000); restored.context.BossAdapter.Adapter.prototype.categoryChanged = () => true;
+  await restored.api.pump(); assert.equal(restored.state().task.categoryPending, undefined);
+  restored.state().task.exhausted = true; restored.state().task.endAt = 1;
+  restored.context.BossAdapter.Adapter.prototype.clickCategory = () => assert.fail('expired tasks must not click');
+  await restored.api.pump(); assert.equal(restored.state().task.status, 'paused');
+});
+
+test('refresh returning to recommendation restores the last confirmed category once', async () => {
+  const r = runtime(); r.api.start(); r.state().task.currentCategory = 'Python(北京)'; let clicks = 0;
+  const proto = r.context.BossAdapter.Adapter.prototype;
+  proto.categoryChoices = () => [{ label: '推荐', active: true }, { label: 'Python(北京)', active: false }];
+  proto.categoryFingerprint = () => 'old'; proto.clickCategory = label => { clicks++; assert.equal(label, 'Python(北京)'); };
+  proto.categoryChanged = () => false;
+  await r.api.pump(); assert.equal(clicks, 1); assert.equal(r.state().task.categoryPending.restoring, true);
+  r.advance(16000); r.advance(2000); await r.api.pump();
+  assert.equal(r.state().task.currentCategory, undefined); assert.equal(r.state().task.categoryPending, undefined);
+  assert.equal(r.state().task.status, 'running');
 });
 
 test('rejected entry dispatches open-only without a message and is not treated as contacted', async () => {
