@@ -141,6 +141,52 @@ test('manual stop blocks scheduler restart for the same Beijing time window', as
   r.advance(86400000); r.advance(2000); await r.api.pump();
   assert.equal(r.state().task.source, 'schedule'); assert.notEqual(r.state().task.id, id);
 });
+
+test('exhausted results refresh after random wait and resume the same task after reload', async () => {
+  const r = runtime(); r.api.start(); const id = r.state().task.id; let reloads = 0;
+  r.location.reload = () => reloads++;
+  r.context.BossAdapter.Adapter.prototype.cards = () => [];
+  r.context.BossAdapter.Adapter.prototype.advance = () => 'end';
+  r.state().task.contacts = 7; r.state().task.visited.push('old');
+  await r.api.pump(); assert.equal(r.state().task.exhausted, true); assert.equal(reloads, 0);
+  await r.api.pump(); assert.equal(reloads, 0);
+  r.advance(61000); r.advance(2000); await r.api.pump();
+  assert.equal(reloads, 1); assert.equal(r.state().task.exhausted, false); assert.equal(r.state().task.contacts, 7);
+  const restored = runtime({}, r.store, 80000);
+  restored.context.BossAdapter.Adapter.prototype.cards = () => [];
+  restored.context.BossAdapter.Adapter.prototype.advance = () => 'end';
+  await restored.api.pump();
+  assert.equal(restored.state().task.status, 'running'); assert.equal(restored.state().task.id, id);
+  assert.equal(restored.state().task.contacts, 7); assert.ok(restored.state().task.visited.includes('old'));
+});
+
+test('rejected entry dispatches open-only without a message and is not treated as contacted', async () => {
+  const r = runtime({ autoSend: true, verifiedEmptyContact: true }); r.api.start(); const entry = chatEntry(r, 'reject');
+  entry.status = 'rejected'; entry.taskId = r.state().task.id; let calls = 0;
+  workerStub(r, cmd => { calls++; assert.equal(cmd.type, 'openOnly'); assert.equal(cmd.args.text, undefined); return { ok: true, data: { opened: true } }; });
+  r.state().task.contacts = r.c.maxContacts; r.state().lastSendAt = Date.parse('2026-10-14T02:00:00Z');
+  const last = r.state().lastSendAt;
+  await r.api.pump(); assert.equal(calls, 1); assert.equal(r.state().task.contacts, r.c.maxContacts);
+  assert.equal(r.state().lastSendAt, last);
+  assert.equal(r.state().entries[entry.key].status, 'rejected'); assert.equal(r.state().entries[entry.key].handoff, true);
+  assert.equal(r.state().outbox[0].status, 'opened'); assert.equal(r.state().task.status, 'running');
+});
+
+test('interrupted open-only actions do not move the real-message interval clock', () => {
+  const r = runtime(); r.api.start(); const s = r.state(); s.lastSendAt = 123;
+  s.entries.x = { key: 'x', status: 'rejected' };
+  s.outbox.push({ id: 'open', key: 'x', kind: 'openOnly', status: 'pending' });
+  r.api.stop('停止'); assert.equal(r.state().lastSendAt, 123);
+  assert.equal(r.state().outbox[0].status, 'uncertain');
+});
+
+test('a previously scored rejected job can open once when it is visible in the current search', async () => {
+  const r = runtime({ autoSend: true, verifiedEmptyContact: true }); r.api.start(); const entry = chatEntry(r, 'old-reject');
+  entry.status = 'rejected'; entry.taskId = 'old-task'; entry.analysis = { score: 40 };
+  r.context.BossAdapter.Adapter.prototype.cards = () => [{ jobId: entry.job.jobId, url: entry.job.url }];
+  workerStub(r, cmd => { assert.equal(cmd.type, 'openOnly'); return { ok: true, data: { opened: true } }; });
+  await r.api.pump(); assert.equal(r.state().entries[entry.key].openOnlyStatus, 'opened');
+});
 test('starting a new manual task resets session quota but not contact history', () => {
   const r = runtime(); r.api.start(); const s = r.state(); s.task.contacts = 50;
   s.entries.x = { status: 'uncertain', key: 'x' }; r.store.set('bossai.v1.state', s);

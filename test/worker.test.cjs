@@ -7,7 +7,7 @@ const source = fs.readFileSync(require('node:path').join(__dirname, '../src/app.
 async function run(options = {}) {
   const store = new Map(), now = Date.now(), callbacks = [], events = [];
   const job = { jobId: 'j', recruiterId: 'r', url: 'https://www.zhipin.com/job_detail/j.html', employmentType: '实习', city: '北京', contactTargetJobId: 'j', alreadyContacted: !!options.alreadyContacted };
-  const c = { ...C.defaults(), autoSend: true, verifyChatWindow: options.verifyChatWindow !== false, resumeName: '测试简历.pdf', profile: { verifiedContact: true, firstContactOpensEmptyChat: true, verifiedReply: true, verifiedResume: true } };
+  const c = { ...C.defaults(), autoSend: true, verifiedEmptyContact: !!options.verifiedEmptyContact, verifyChatWindow: options.verifyChatWindow !== false, resumeName: '测试简历.pdf', profile: { verifiedContact: true, firstContactOpensEmptyChat: true, verifiedReply: true, verifiedResume: true } };
   const s = C.emptyState(); s.task = C.createTask(c, now); s.task.leaseToken = 'leader';
   const cmd = { id: 'cmd', workerId: 'worker', taskId: s.task.id, sendId: 'send', owner: 'leader', createdAt: now,
     type: options.type || 'contact', phase: options.phase || 'chat', args: { job, text: '您好，我有相关项目经验', historyTail: 'in1', inboundId: 'in1', resumeName: c.resumeName } };
@@ -77,9 +77,22 @@ async function run(options = {}) {
 test('worker sends a single custom greeting to a verified empty conversation', async () => {
   const { events, result, history } = await run(); assert.equal(result.ok, true); assert.equal(result.data.confirmed, true);
   assert.equal(events.filter(x => x === 'send').length, 1);
-  assert.ok(history.at(-1).text.endsWith(C.AI_NOTICE));
+  assert.equal(history.at(-1).text.endsWith(C.AI_NOTICE), false);
   assert.ok(history.at(-1).text.includes(C.PROJECT_URL));
   assert.ok(events.includes('closeWorker'));
+});
+
+test('open-only clicks the bound contact button once and never reads history, fills or sends', async () => {
+  const { events, result } = await run({ type: 'openOnly', phase: 'detail', verifiedEmptyContact: true, extraTicks: 2 });
+  assert.equal(result.data.opened, true); assert.equal(events.filter(e => e === 'contact').length, 1);
+  assert.equal(events.includes('fill'), false); assert.equal(events.includes('send'), false); assert.ok(events.includes('closeWorker'));
+});
+
+test('open-only requires no-default-greeting verification and skips existing contacts', async () => {
+  const unverified = await run({ type: 'openOnly' });
+  assert.equal(unverified.result.ok, false); assert.equal(unverified.events.includes('contact'), false);
+  const existing = await run({ type: 'openOnly', verifiedEmptyContact: true, alreadyContacted: true });
+  assert.equal(existing.result.data.existing, true); assert.equal(existing.events.includes('contact'), false);
 });
 
 test('new outgoing AI keyword confirms despite changed wording or formatting', async () => {
@@ -88,8 +101,20 @@ test('new outgoing AI keyword confirms despite changed wording or formatting', a
   assert.equal(events.filter(e => e === 'send').length, 1);
 });
 
-test('old AI messages, incoming AI messages and messages without AI cannot confirm this send', async () => {
-  for (const options of [{ noReceipt: true }, { receiptText: '普通消息' }, { receiptText: '招聘者说 AI', receiptRole: 'recruiter' }]) {
+test('new plugin introduction confirms a greeting and prevents a duplicate first contact', async () => {
+  const current = await run({ receiptText: '招呼内容\n' + C.PROJECT_INTRO });
+  assert.equal(current.result.data.confirmed, true);
+  const prior = await run({ history: [{ id: 'old-plugin', role: 'candidate', text: C.PROJECT_INTRO }] });
+  assert.equal(prior.result.data.priorAI, true); assert.equal(prior.events.includes('send'), false);
+});
+
+test('a new outgoing reply without an AI footer is still a valid receipt', async () => {
+  const r = await run({ type: 'reply', receiptText: '我有相关项目经验。', history: [{ id: 'in1', role: 'recruiter', text: '有什么经历' }] });
+  assert.equal(r.result.data.confirmed, true);
+});
+
+test('old messages and incoming messages cannot confirm a reply send', async () => {
+  for (const options of [{ noReceipt: true }, { receiptText: '招聘者说 AI', receiptRole: 'recruiter' }]) {
     const { result } = await run({ type: 'reply', history: [
       { id: 'oldAI', role: 'candidate', text: '之前的 AI 消息' },
       { id: 'in1', role: 'recruiter', text: '请介绍项目经验' }
@@ -113,9 +138,9 @@ test('reading a conversation closes the worker after returning data', async () =
   const { events, result } = await run({ type: 'history' });
   assert.equal(result.ok, true); assert.ok(Array.isArray(result.data)); assert.ok(events.includes('closeWorker'));
 });
-test('worker adds disclosure to a queued legacy reply that has no marker', async () => {
+test('worker sends replies without the removed footer', async () => {
   const { result, history } = await run({ type: 'reply', history: [{ id: 'in1', role: 'recruiter', text: '你有什么项目经验', rich: false }] });
-  assert.equal(result.data.confirmed, true); assert.ok(history.at(-1).text.endsWith(C.AI_NOTICE));
+  assert.equal(result.data.confirmed, true); assert.equal(history.at(-1).text.endsWith(C.AI_NOTICE), false);
   assert.equal(history.at(-1).text.includes(C.PROJECT_URL), false);
 });
 test('platform default greeting blocks an extra custom greeting', async () => {

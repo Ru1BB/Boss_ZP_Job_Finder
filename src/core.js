@@ -30,16 +30,19 @@
     threshold: 80, maxContacts: 50, sendIntervalSeconds: 180, aiTimeoutSeconds: 180,
     refreshMinSeconds: 10, refreshMaxSeconds: 60, maxReplies: 5,
     scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false, verifyChatWindow: true,
+    openRejected: true, verifiedEmptyContact: false,
     resumeName: '', internshipOnly: true, requiredCity: '北京', profile: {}
   });
   const fail = message => { throw new Error(message); };
+  // Legacy marker: remove it from queued text and recognize old history; never append it.
   const AI_NOTICE = '（本消息由 AI 发送）';
+  const PROJECT_INTRO = '此消息发送自本人开发的油猴插件，这是一个基于大模型的求职助手，可分析岗位匹配度并自动发送个性化打招呼。';
   const PROJECT_URL = 'https://github.com/Ru1BB/Boss_ZP_Job_Finder';
   function aiMessage(text) {
     let body = String(text || '').trim();
     if (!body) return '';
-    while (body.endsWith(AI_NOTICE)) body = body.slice(0, -AI_NOTICE.length).trimEnd();
-    return body ? body + '\n' + AI_NOTICE : '';
+    while (AI_NOTICE && body.endsWith(AI_NOTICE)) body = body.slice(0, -AI_NOTICE.length).trimEnd();
+    return body;
   }
   function anonymousMessage(text, resume = '', job = {}) {
     let body = String(text || '');
@@ -51,14 +54,14 @@
   function greetingMessage(text, resume = '', job = {}) {
     let body = anonymousMessage(text, resume, job);
     if (!body) return '';
-    body = body.slice(0, -AI_NOTICE.length).trimEnd();
-    const introduction = '这是一个基于大模型的求职助手，可分析岗位匹配度并自动发送个性化招呼。';
+    body = body.replaceAll('这是一个基于大模型的求职助手，可分析岗位匹配度并自动发送个性化招呼。', '').trim();
+    const introduction = PROJECT_INTRO;
     if (!body.includes(introduction)) body += '\n' + introduction;
     if (!body.includes(PROJECT_URL)) body += '\n自动发送项目：' + PROJECT_URL;
     return aiMessage(body);
   }
   function isAIOutgoing(message) {
-    return message?.role === 'candidate' && typeof message.text === 'string' && message.text.includes('AI');
+    return message?.role === 'candidate' && typeof message.text === 'string' && (message.text.includes('AI') || message.text.includes(PROJECT_INTRO));
   }
   function fixedConfig(raw = {}) {
     const provider = raw.provider ?? 'qwen';
@@ -73,7 +76,7 @@
     for (const key of ['baseUrl', 'model', 'apiKey', 'resume', 'preferences', 'screeningPrompt', 'greetingPrompt', 'resumeName', 'requiredCity']) {
       if (typeof c[key] !== 'string') fail(`配置 ${key} 必须是文字`);
     }
-    for (const key of ['autoSend', 'verifyChatWindow', 'scheduleEnabled', 'internshipOnly']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
+    for (const key of ['autoSend', 'verifyChatWindow', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
     for (const [key, min, max] of [['threshold', 0, 100], ['maxContacts', 1, 500],
       ['sendIntervalSeconds', 1, 86400], ['refreshMinSeconds', 1, 3600],
       ['refreshMaxSeconds', 1, 3600], ['maxReplies', 1, 100], ['aiTimeoutSeconds', 30, 600]]) {
@@ -179,7 +182,7 @@
     return matches.some(entry => Number.isFinite(entry.analysis?.score) && entry.analysis.score >= 0 && entry.analysis.score <= 100);
   }
   function firstContactStatus(history) {
-    if (history.some(m => m.role === 'candidate' && typeof m.text === 'string' && m.text.includes(AI_NOTICE))) return 'ai-sent';
+    if (history.some(m => m.role === 'candidate' && typeof m.text === 'string' && ((AI_NOTICE && m.text.includes(AI_NOTICE)) || m.text.includes(PROJECT_INTRO)))) return 'ai-sent';
     if (history.some(m => m.role === 'candidate')) return 'manual-sent';
     return history.length ? 'incoming-or-unknown' : 'empty';
   }
@@ -213,6 +216,9 @@
   }
   function canSend(s, c, now, kind, entry) {
     if (!allowed(s, c, now) || !c.autoSend) return false;
+    if (kind === 'openOnly') return !!(c.openRejected && c.verifiedEmptyContact &&
+      entry?.status === 'rejected' && !entry.handoff && !entry.openOnlyStatus &&
+      !s.outbox.some(item => item.key === entry.key && ['contact', 'openOnly'].includes(item.kind)));
     if (now < (s.lastSendAt ?? 0) + c.sendIntervalSeconds * 1000) return false;
     if (kind === 'contact' && s.task.contacts >= c.maxContacts) return false;
     if (kind === 'contact' && (!entry || entry.status !== 'eligible' || entry.handoff ||
@@ -224,7 +230,7 @@
   const emptyState = () => ({ task: null, lastSendAt: 0, blockedWindow: '', entries: {}, outbox: [], logs: [] });
   function clearActivity(s) {
     s.logs = [];
-    const protectedKeys = new Set(s.outbox.filter(item => ['pending', 'sent', 'uncertain'].includes(item.status)).map(item => item.key));
+    const protectedKeys = new Set(s.outbox.filter(item => ['pending', 'sent', 'uncertain', 'opened'].includes(item.status)).map(item => item.key));
     for (const [key, entry] of Object.entries(s.entries)) {
       if (['contacted', 'uncertain', 'retryable', 'existing'].includes(entry.status) || protectedKeys.has(key)) {
         delete entry.pendingReply; entry.hidden = true;
@@ -249,8 +255,9 @@
     if (!canSend(s, c, now, kind, entry)) fail('当前不允许发送');
     const id = `${s.task.id}-${s.outbox.length}-${now}`;
     const item = { id, taskId: s.task.id, key: entry.key, kind, payload, status: 'pending', stage: 'reserved', createdAt: now };
-    s.outbox.push(item); s.lastSendAt = now;
+    s.outbox.push(item); if (kind !== 'openOnly') s.lastSendAt = now;
     if (kind === 'contact') { s.task.contacts++; entry.status = 'uncertain'; }
+    if (kind === 'openOnly') entry.openOnlyStatus = 'pending';
     if (kind === 'reply') s.task.replies[entry.key] = (s.task.replies[entry.key] || 0) + 1;
     if (kind === 'resume') entry.resumeStatus = 'uncertain';
     return item;
@@ -259,6 +266,6 @@
   function leaseWinner(claims, now) {
     return claims.filter(c => c && c.expires > now).sort((a, b) => a.claimedAt - b.claimedAt || a.owner.localeCompare(b.owner))[0]?.owner ?? null;
   }
-  return { AI_NOTICE, PROJECT_URL, aiMessage, anonymousMessage, greetingMessage, isAIOutgoing, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, parseJSON, analysis, reply, pair,
+  return { AI_NOTICE, PROJECT_INTRO, PROJECT_URL, aiMessage, anonymousMessage, greetingMessage, isAIOutgoing, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, parseJSON, analysis, reply, pair,
     sensitive, wantsResume, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner };
 });

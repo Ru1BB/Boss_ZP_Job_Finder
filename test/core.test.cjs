@@ -2,14 +2,14 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const C = require('../src/core.js');
 const now = Date.parse('2026-10-14T02:00:00Z');
-test('greetings append the project URL once before the AI notice', () => {
+test('greetings append the new introduction and URL once without a trailing AI notice', () => {
   const greeting = C.greetingMessage('您好，我做过实际项目');
-  assert.ok(greeting.includes(C.PROJECT_URL)); assert.ok(greeting.endsWith(C.AI_NOTICE));
-  assert.ok(greeting.includes('这是一个基于大模型的求职助手，可分析岗位匹配度并自动发送个性化招呼。'));
+  assert.ok(greeting.includes(C.PROJECT_URL)); assert.equal(greeting.endsWith(C.AI_NOTICE), false);
+  assert.ok(greeting.includes(C.PROJECT_INTRO));
   assert.equal(C.greetingMessage(greeting), greeting);
   assert.equal(C.greetingMessage(''), '');
   const legacy = C.greetingMessage('您好\n自动发送项目：' + C.PROJECT_URL + '\n' + C.AI_NOTICE);
-  assert.ok(legacy.includes('这是一个基于大模型的求职助手'));
+  assert.ok(legacy.includes(C.PROJECT_INTRO));
   assert.equal(legacy.split(C.PROJECT_URL).length - 1, 1);
   assert.equal(C.greetingMessage(legacy), legacy);
 });
@@ -32,6 +32,19 @@ test('defaults implement Beijing internships and independent refresh/send clocks
   assert.equal(C.randomDelay(c, () => 0), 10000);
   assert.equal(C.randomDelay(c, () => 0.999999), 60000);
   assert.equal(C.randomDelay(c, () => 0.5), 35000);
+});
+
+test('open-only requires verification but does not consume quota or send spacing and is never repeated', () => {
+  const { s, c, entry } = setup(); entry.status = 'rejected';
+  assert.equal(C.canSend(s, c, now, 'openOnly', entry), false);
+  c.verifiedEmptyContact = true; assert.equal(C.canSend(s, c, now, 'openOnly', entry), true);
+  s.task.contacts = c.maxContacts; s.lastSendAt = now - 1;
+  assert.equal(C.canSend(s, c, now, 'openOnly', entry), true);
+  const item = C.reserve(s, c, now, 'openOnly', entry, {});
+  assert.equal(s.task.contacts, c.maxContacts); assert.equal(s.lastSendAt, now - 1);
+  assert.equal(entry.status, 'rejected'); assert.equal(entry.openOnlyStatus, 'pending');
+  assert.equal(C.canSend(s, c, now + 999999, 'openOnly', entry), false);
+  item.status = 'opened'; C.clearActivity(s); assert.equal(s.entries[entry.key].hidden, true);
 });
 
 test('chat window verification defaults on for old configs and requires explicit boolean opt-out', () => {
@@ -88,17 +101,17 @@ test('internship text and daily salary are alternative positive signals', () => 
   assert.equal(C.hardFilter({ description: '餐补20元/天', salary: '8K/月', employmentType: '全职', city: '北京' }, c).status, 'rejected');
 });
 test('AI disclosure is appended once to greetings and replies, including old queued text', () => {
-  assert.equal(C.aiMessage('您好'), '您好\n' + C.AI_NOTICE);
+  assert.equal(C.aiMessage('您好'), '您好');
   assert.equal(C.aiMessage(C.aiMessage('您好')), C.aiMessage('您好'));
   assert.equal(C.aiMessage('您好\n' + C.AI_NOTICE + '\n' + C.AI_NOTICE), C.aiMessage('您好'));
   assert.equal(C.aiMessage(''), '');
-  assert.ok(C.analysis({ score: 90, suitable: true, uncertain: false, reason: '符合', doubts: [], greeting: '您好' }).greeting.endsWith(C.AI_NOTICE));
-  assert.ok(C.reply({ action: 'reply', text: '我有项目经验', reason: '有依据', evidence: ['项目经验'] }).text.endsWith(C.AI_NOTICE));
+  assert.equal(C.analysis({ score: 90, suitable: true, uncertain: false, reason: '符合', doubts: [], greeting: '您好' }).greeting.endsWith(C.AI_NOTICE), false);
+  assert.equal(C.reply({ action: 'reply', text: '我有项目经验', reason: '有依据', evidence: ['项目经验'] }).text.endsWith(C.AI_NOTICE), false);
 });
 test('known personal names are replaced at the final message boundary', () => {
   const result = C.anonymousMessage('您好赵女士，我是张小明，来自示例大学。', '姓名：张小明。\n学校：示例大学', { recruiterName: '赵女士' });
   assert.equal(result.includes('张小明'), false); assert.equal(result.includes('赵女士'), false);
-  assert.ok(result.includes('示例大学')); assert.ok(result.endsWith(C.AI_NOTICE));
+  assert.ok(result.includes('示例大学')); assert.equal(result.endsWith(C.AI_NOTICE), false);
 });
 test('daily Beijing window start inclusive/end exclusive independent of host timezone', () => {
   const c = { ...C.defaults(), scheduleEnabled: true, startTime: '09:00', stopTime: '18:00' };
@@ -195,7 +208,7 @@ test('weighted job score is calculated by code and optional conditions contribut
   const fullBonus = C.scoredAnalysis(scoredJob({ bonus: 10 }));
   assert.equal(withoutBonus.score, 80); assert.equal(fullBonus.score, 90); assert.equal(withoutBonus.scoringVersion, 2);
   assert.equal(C.decide(withoutBonus, C.defaults()), 'eligible');
-  assert.ok(withoutBonus.greeting.endsWith(C.AI_NOTICE));
+  assert.equal(withoutBonus.greeting.endsWith(C.AI_NOTICE), false);
 });
 test('a job without optional requirements receives the neutral bonus value rather than a penalty', () => {
   const result = C.scoredAnalysis(scoredJob({}, { hasBonusRequirements: false }));
