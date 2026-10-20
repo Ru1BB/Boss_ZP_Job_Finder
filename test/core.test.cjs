@@ -1,6 +1,21 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const C = require('../src/core.js');
+
+test('explicit internship exclusions override keywords and daily pay', () => {
+  for (const description of ['只招全职，不接受实习生', '不招实习生', '实习生勿投', '非实习岗位', '不考虑在校实习生', '谢绝实习生']) {
+    for (const salary of ['20-30K', '200元/天']) {
+      assert.equal(C.hardFilter({ title: '后端开发', city: '北京', description, salary }, C.defaults()).status, 'rejected', description);
+    }
+  }
+});
+test('internship offers, daily pay and non-exclusion negations remain eligible', () => {
+  for (const description of ['招聘实习生，不要求实习经历', '接受实习或全职', '实习生不需要工作经验', '不接受加班，招聘实习生']) {
+    assert.equal(C.hardFilter({ city: '北京', description }, C.defaults()).status, 'pass', description);
+  }
+  assert.equal(C.hardFilter({ city: '北京', title: '开发', salary: '200元/天' }, C.defaults()).status, 'pass');
+  assert.equal(C.hardFilter({ city: '北京', description: '不招实习生' }, { ...C.defaults(), internshipOnly: false }).status, 'pass');
+});
 const now = Date.parse('2026-10-14T02:00:00Z');
 test('old manually entered category names are discarded during config normalization', () => {
   assert.equal(Object.hasOwn(C.defaults(), 'categoryLabels'), false);

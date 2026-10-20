@@ -61,8 +61,42 @@
       return ns[0];
     }
     text(selector, scope = this.doc) { return this.nodes(selector, scope).map(n => n.innerText || n.textContent || '').join('\n').trim(); }
+    healthVisible(node) {
+      for (let n = node; n; n = n.parentElement) {
+        const style = this.doc.defaultView?.getComputedStyle?.(n);
+        if (n.hidden || n.getAttribute?.('aria-hidden') === 'true' || style?.display === 'none' ||
+          style?.visibility === 'hidden' || style?.visibility === 'collapse' || style?.opacity === '0') return false;
+      }
+      return true;
+    }
+    healthIssue() {
+      const classify = text => /访问过于频繁|操作频繁|账号异常|访问受限/.test(text) ? 'restriction' :
+        /登录失效|登录已过期|请先登录|重新登录/.test(text) ? 'login' :
+        /安全验证|请完成验证|拖动滑块|验证码/.test(text) ? 'verification' :
+        /网络异常|网络连接失败|页面加载失败|系统繁忙|服务开小差|请求超时/.test(text) ? 'transient' : null;
+      const controls = this.nodes(this.p.blocked).filter(n => this.healthVisible(n));
+      if (controls.length) return { kind: controls.some(n => n.matches?.('.login-dialog')) ? 'login' : 'verification' };
+      for (const dialog of this.nodes('[role="dialog"]').filter(n => this.healthVisible(n))) {
+        const kind = classify(dialog.innerText || '');
+        if (kind) return { kind };
+      }
+      // Never classify normal job descriptions, chat messages or our own log as a block page.
+      const functional = [this.p.cardLink, this.p.detail, this.p.composer, this.p.conversationRow]
+        .some(selector => this.nodes(selector).length);
+      if (functional) return null;
+      let text = this.doc.body?.innerText || '';
+      const host = this.doc.getElementById?.('boss-ai-host');
+      if (host?.innerText) text = text.replace(host.innerText, '');
+      text = text.trim();
+      if (!text || text.length > 400) return null;
+      const kind = classify(text); return kind ? { kind } : null;
+    }
     health() {
-      if (this.nodes(this.p.blocked).length || /安全验证|访问过于频繁|账号异常|请完成验证/.test(this.doc.body?.innerText || '')) throw new Error('检测到登录、验证或平台限制，请手动处理后重新启动');
+      const issue = this.healthIssue();
+      if (!issue) return;
+      const labels = { verification: '安全验证', login: '登录失效', restriction: '平台限制', transient: '页面暂时异常' };
+      const error = new Error('检测到' + labels[issue.kind]);
+      error.code = 'PAGE_HEALTH'; error.healthIssue = issue; throw error;
     }
     safeUrl(url) {
       const u = new URL(url, this.doc.location.href);

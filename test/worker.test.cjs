@@ -18,7 +18,12 @@ async function run(options = {}) {
   const p = { detail: 'detail', chatIdentity: 'identity', contact: 'contact', send: 'send', resumeOpen: 'open', resumeDialog: 'dialog', resumeItem: 'item', resumeName: 'name', resumeSend: 'resumeSend', resumeReceipt: 'receipt', chatUrl: 'https://www.zhipin.com/web/geek/chat' };
   class FakeAdapter {
     constructor(doc, profile, jobs, config = {}) { this.p = p; this.verifyChatWindow = config.verifyChatWindow !== false; }
-    health() { if (options.blocked) throw new Error('验证阻止'); }
+    health() {
+      if (options.blocked) throw new Error('验证阻止');
+      if (options.healthKind && !(options.recoverOnReload && events.includes('reloadWorker'))) {
+        const e = new Error('页面检测异常'); e.code = 'PAGE_HEALTH'; e.healthIssue = { kind: options.healthKind }; throw e;
+      }
+    }
     chatReady() { return options.emptyChat ? events.includes('selectConversation') && !options.neverLoads : true; }
     assertIdentity() { if (this.verifyChatWindow && options.wrongIdentity) throw new Error('身份不匹配'); }
     history() { return structuredClone(history); }
@@ -55,7 +60,7 @@ async function run(options = {}) {
   const context = { BossCore: C, BossAdapter: { Adapter: FakeAdapter, DEFAULT_PROFILE: p },
     crypto: require('node:crypto').webcrypto, URL, URLSearchParams, Date: Clock, console,
     sessionStorage: { getItem: () => 'worker', setItem() {} },
-    location: { href: 'https://www.zhipin.com/web/geek/chat', hash: '', assign(url) { events.push('navigate:' + url); } },
+    location: { href: 'https://www.zhipin.com/web/geek/chat', hash: '', reload() { events.push('reloadWorker'); }, assign(url) { events.push('navigate:' + url); } },
     document: { createElement: () => ({ style: {} }), documentElement: { append() {} } },
     GM_getValue: (k, fallback = null) => store.has(k) ? structuredClone(store.get(k)) : fallback,
     GM_setValue: (k, v) => store.set(k, structuredClone(v)), GM_listValues: () => [...store.keys()], GM_deleteValue: k => store.delete(k),
@@ -74,6 +79,23 @@ async function run(options = {}) {
   }
   return { events, result: store.get('bossai.v1.result.cmd'), store, history };
 }
+
+test('temporary read failure refreshes once and then continues without sending', async () => {
+  const r = await run({ type: 'history', healthKind: 'transient', recoverOnReload: true, extraTicks: 4 });
+  assert.equal(r.result.ok, true); assert.equal(r.events.filter(x => x === 'reloadWorker').length, 1);
+  assert.equal(r.events.includes('send'), false);
+});
+test('persistent temporary read failure is returned after only one refresh', async () => {
+  const r = await run({ type: 'history', healthKind: 'transient', extraTicks: 7 });
+  assert.equal(r.result.ok, false); assert.equal(r.result.healthIssue.kind, 'transient');
+  assert.equal(r.events.filter(x => x === 'reloadWorker').length, 1);
+});
+test('real verification and uncertain sends never trigger recovery refresh or replay', async () => {
+  for (const options of [{ healthKind: 'verification', extraTicks: 4 }, { healthKind: 'transient', consumed: true, extraTicks: 4 }]) {
+    const r = await run(options); assert.equal(r.result.ok, false);
+    assert.equal(r.events.includes('reloadWorker'), false); assert.equal(r.events.includes('send'), false);
+  }
+});
 test('worker sends a single custom greeting to a verified empty conversation', async () => {
   const { events, result, history } = await run(); assert.equal(result.ok, true); assert.equal(result.data.confirmed, true);
   assert.equal(events.filter(x => x === 'send').length, 1);

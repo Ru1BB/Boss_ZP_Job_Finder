@@ -243,9 +243,11 @@
   function hardFilter(job, c) {
     const type = job.employmentType || '', city = job.city || '';
     const text = [job.title, type, job.description].filter(Boolean).join('\n');
+    const excludesInternship = /(?:不接受|不招(?:收|聘)?|不要(?!求)|不考虑|拒绝|谢绝)\s*(?:任何|在校)?\s*(?:的)?实习(?:生)?|非实习(?:岗|岗位)|实习(?:生)?\s*(?:勿投|勿扰|不招|不考虑|除外)/.test(text);
     const internshipText = /实习/.test(text);
     const dailySalary = /日薪|[\/／]\s*[天日]|按[天日](?:计薪|计酬|计算|结算)|每[天日]\s*\d|(?:元|块)\s*一[天日]/.test(job.salary || '');
     if (c.requiredCity && city && !city.startsWith(c.requiredCity)) return { status: 'rejected', reason: '工作地点不在' + c.requiredCity };
+    if (c.internshipOnly && excludesInternship) return { status: 'rejected', reason: '岗位明确不接受实习，否定说明优先于实习关键词或日薪' };
     if (c.internshipOnly && !internshipText && !dailySalary) {
       if (/全职|正式|兼职/.test(type)) return { status: 'rejected', reason: '未包含实习文本且薪资不是日薪' };
       return { status: 'review', reason: '未找到实习文本或明确日薪，需人工确认' };

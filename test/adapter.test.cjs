@@ -20,6 +20,32 @@ function adapter(selectors = {}, profile = {}, options = {}) {
   return new DOMAdapter(doc, profile, [], options);
 }
 
+test('health ignores challenge keywords in actual jobs and our own status log', () => {
+  const a = adapter({ [P.detail]: [element({}, '负责安全验证和验证码系统')] });
+  a.doc.body = { innerText: '安全验证 访问过于频繁' };
+  assert.equal(a.healthIssue(), null);
+  const b = adapter(); b.doc.body = { innerText: '检测到安全验证' };
+  b.doc.getElementById = () => ({ innerText: '检测到安全验证' });
+  assert.equal(b.healthIssue(), null);
+});
+
+test('health distinguishes independent block pages and temporary failures', () => {
+  for (const [text, kind] of [['请完成验证', 'verification'], ['请先登录', 'login'], ['访问过于频繁', 'restriction'], ['页面加载失败', 'transient']]) {
+    const a = adapter(); a.doc.body = { innerText: text };
+    assert.equal(a.healthIssue().kind, kind);
+    assert.throws(() => Adapter.prototype.health.call(a), e => e.code === 'PAGE_HEALTH' && e.healthIssue.kind === kind);
+  }
+});
+
+test('health ignores hidden stale challenge controls but blocks visible controls over jobs', () => {
+  const node = element(); node.matches = () => false;
+  const a = adapter({ [P.blocked]: [node], [P.detail]: [element()] });
+  a.doc.defaultView = { getComputedStyle: () => ({ visibility: 'hidden' }) };
+  assert.equal(a.healthIssue(), null);
+  a.doc.defaultView.getComputedStyle = () => ({ visibility: 'visible' });
+  assert.equal(a.healthIssue().kind, 'verification');
+});
+
 function categoryFixture() {
   const clicked = [];
   const items = ['推荐', '测试(北京)', 'Python(北京)', '更多', '公司(北京)'].map((label, i) => {

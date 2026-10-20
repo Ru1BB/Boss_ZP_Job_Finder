@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS AI 求职助手（试运行优先）
 // @namespace    local.boss-ai
-// @version      0.1.27
+// @version      0.1.30
 // @description  AI 职位筛选、受控沟通与北京时间调度；请先校准页面
 // @match        https://www.zhipin.com/*
 // @grant        GM_getValue
@@ -269,9 +269,11 @@
   function hardFilter(job, c) {
     const type = job.employmentType || '', city = job.city || '';
     const text = [job.title, type, job.description].filter(Boolean).join('\n');
+    const excludesInternship = /(?:不接受|不招(?:收|聘)?|不要(?!求)|不考虑|拒绝|谢绝)\s*(?:任何|在校)?\s*(?:的)?实习(?:生)?|非实习(?:岗|岗位)|实习(?:生)?\s*(?:勿投|勿扰|不招|不考虑|除外)/.test(text);
     const internshipText = /实习/.test(text);
     const dailySalary = /日薪|[\/／]\s*[天日]|按[天日](?:计薪|计酬|计算|结算)|每[天日]\s*\d|(?:元|块)\s*一[天日]/.test(job.salary || '');
     if (c.requiredCity && city && !city.startsWith(c.requiredCity)) return { status: 'rejected', reason: '工作地点不在' + c.requiredCity };
+    if (c.internshipOnly && excludesInternship) return { status: 'rejected', reason: '岗位明确不接受实习，否定说明优先于实习关键词或日薪' };
     if (c.internshipOnly && !internshipText && !dailySalary) {
       if (/全职|正式|兼职/.test(type)) return { status: 'rejected', reason: '未包含实习文本且薪资不是日薪' };
       return { status: 'review', reason: '未找到实习文本或明确日薪，需人工确认' };
@@ -361,8 +363,42 @@
       return ns[0];
     }
     text(selector, scope = this.doc) { return this.nodes(selector, scope).map(n => n.innerText || n.textContent || '').join('\n').trim(); }
+    healthVisible(node) {
+      for (let n = node; n; n = n.parentElement) {
+        const style = this.doc.defaultView?.getComputedStyle?.(n);
+        if (n.hidden || n.getAttribute?.('aria-hidden') === 'true' || style?.display === 'none' ||
+          style?.visibility === 'hidden' || style?.visibility === 'collapse' || style?.opacity === '0') return false;
+      }
+      return true;
+    }
+    healthIssue() {
+      const classify = text => /访问过于频繁|操作频繁|账号异常|访问受限/.test(text) ? 'restriction' :
+        /登录失效|登录已过期|请先登录|重新登录/.test(text) ? 'login' :
+        /安全验证|请完成验证|拖动滑块|验证码/.test(text) ? 'verification' :
+        /网络异常|网络连接失败|页面加载失败|系统繁忙|服务开小差|请求超时/.test(text) ? 'transient' : null;
+      const controls = this.nodes(this.p.blocked).filter(n => this.healthVisible(n));
+      if (controls.length) return { kind: controls.some(n => n.matches?.('.login-dialog')) ? 'login' : 'verification' };
+      for (const dialog of this.nodes('[role="dialog"]').filter(n => this.healthVisible(n))) {
+        const kind = classify(dialog.innerText || '');
+        if (kind) return { kind };
+      }
+      // Never classify normal job descriptions, chat messages or our own log as a block page.
+      const functional = [this.p.cardLink, this.p.detail, this.p.composer, this.p.conversationRow]
+        .some(selector => this.nodes(selector).length);
+      if (functional) return null;
+      let text = this.doc.body?.innerText || '';
+      const host = this.doc.getElementById?.('boss-ai-host');
+      if (host?.innerText) text = text.replace(host.innerText, '');
+      text = text.trim();
+      if (!text || text.length > 400) return null;
+      const kind = classify(text); return kind ? { kind } : null;
+    }
     health() {
-      if (this.nodes(this.p.blocked).length || /安全验证|访问过于频繁|账号异常|请完成验证/.test(this.doc.body?.innerText || '')) throw new Error('检测到登录、验证或平台限制，请手动处理后重新启动');
+      const issue = this.healthIssue();
+      if (!issue) return;
+      const labels = { verification: '安全验证', login: '登录失效', restriction: '平台限制', transient: '页面暂时异常' };
+      const error = new Error('检测到' + labels[issue.kind]);
+      error.code = 'PAGE_HEALTH'; error.healthIssue = issue; throw error;
     }
     safeUrl(url) {
       const u = new URL(url, this.doc.location.href);
@@ -716,7 +752,7 @@
 
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.27';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.30';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -727,7 +763,7 @@
   const workerId = sessionStorage.getItem(prefix + 'worker') || new URLSearchParams(location.hash.slice(1)).get('bossaiWorker');
   if (workerId) sessionStorage.setItem(prefix + 'worker', workerId);
   let busy = false, activeRequest = null, leader = false, leaseSince = 0, workerTab = null, workerTabId = null;
-  let logMessage = '', apiTesting = false, starting = false;
+  let logMessage = '', apiTesting = false, starting = false, retiring = false;
   const claims = () => GM_listValues().filter(k => k.startsWith(prefix + 'lease.')).map(k => GM_getValue(k));
   function winner() {
     const now = Date.now(), all = claims(), task = state().task, preference = get('startPreference'), clearing = get('clearActivityRequest');
@@ -738,6 +774,7 @@
     return C.leaseWinner(all, now);
   }
   function renewLease() {
+    if (retiring) return false;
     // Maintenance must work on detail pages too, even with no search page open.
     if (!location.pathname.includes('/web/geek/jobs') && !get('clearActivityRequest')) { leader = false; GM_deleteValue(prefix + 'lease.' + owner); return false; }
     const now = Date.now(), mine = get('lease.' + owner);
@@ -750,6 +787,12 @@
     return leader;
   }
   function owned() { return leader && winner() === owner && get('lease.' + owner)?.expires > Date.now(); }
+  function releaseLease() {
+    // A normal refresh/navigation retires this document immediately. Crashes and
+    // frozen tabs still use the 15-second expiry; never delete another tab's claim.
+    retiring = true; leader = false; GM_deleteValue(prefix + 'lease.' + owner);
+    activeRequest?.abort?.();
+  }
   function persist(s) {
     if (!owned()) throw new Error('执行权已转移，停止当前操作');
     put('state', s);
@@ -1029,7 +1072,7 @@
         const result = get('result.' + id);
         if (result) {
           put('command', null); GM_deleteValue(prefix + 'result.' + id);
-          if (!result.ok) throw new Error(result.error);
+          if (!result.ok) throw resultError(result);
           const completed = state(); log(completed, label + '完成'); persist(completed);
           return result.data;
         }
@@ -1093,7 +1136,64 @@
     log(s, entry.note); persist(s);
   }
   function globalFailure(error) {
-    return error.code === 'AI_RETRY_EXHAUSTED' || /检测到登录、验证或平台限制|尚未关闭|关闭未确认|未返回可关闭|执行权|工作指令过期|没有有效的发送预约|拒绝导航/.test(error.message);
+    return error.code === 'PAGE_HEALTH' && error.healthIssue?.kind !== 'transient' || error.code === 'AI_RETRY_EXHAUSTED' || /检测到登录、验证或平台限制|尚未关闭|关闭未确认|未返回可关闭|执行权|工作指令过期|没有有效的发送预约|拒绝导航/.test(error.message);
+  }
+  function resultError(result) {
+    const error = new Error(result.error);
+    if (result.healthIssue) { error.code = 'PAGE_HEALTH'; error.healthIssue = result.healthIssue; }
+    return error;
+  }
+  function waitForPageHealth(error) {
+    const s = state(), now = Date.now(), kind = error.healthIssue.kind;
+    let probe = s.task.healthProbe;
+    if (!probe || probe.kind !== kind) {
+      probe = s.task.healthProbe = { kind, firstAt: now };
+      log(s, error.message + '，暂停页面动作，等待5秒自动复查');
+    }
+    if (now - probe.firstAt < 5000) { persist(s); return; }
+    if (kind !== 'transient') { stop(error.message + '持续存在，请手动处理后重新启动'); return; }
+    if (!probe.refreshed || now >= (probe.retryAt || 0)) {
+      probe.reloads = (probe.reloads || (probe.refreshed ? 1 : 0)) + 1;
+      const delay = Math.min(600000, 60000 * 2 ** Math.min(probe.reloads - 1, 4));
+      probe.refreshed = true; probe.retryAt = now + delay;
+      log(s, `页面临时故障：第${probe.reloads}次刷新恢复原任务；若仍异常，${delay / 1000}秒后再试，保留计数与发送记录`);
+      persist(s); location.reload(); return;
+    }
+    persist(s);
+  }
+  async function recoverExecution(taskId) {
+    const old = get('command'), active = get('activeWorker');
+    const commandId = old?.id || active?.commandId;
+    if (commandId) put('cancel.' + commandId, true);
+    put('command', null); // Retire first so neither old nor new workers can replay it.
+    let s = state();
+    s.task.leaseToken = owner;
+    quarantinePending(s, '执行实例变化：仅隔离受影响记录，其它任务继续');
+    s.task.nextChatAt = Date.now() + C.randomDelay(config());
+    s.task.nextScanAt = Date.now();
+    log(s, '执行实例变化：正在取消旧指令并清理工作页，保留原任务'); persist(s);
+    const workerIds = [...new Set([old?.workerId, active?.id].filter(Boolean))];
+    for (const id of workerIds) {
+      if (!await closeManagedWorker(id)) throw new Error('恢复任务时旧工作页关闭未确认，暂停以防重复操作');
+      if (!still(taskId)) return;
+    }
+    if (!still(taskId)) return;
+    s = state();
+    const result = commandId ? get('result.' + commandId) : null;
+    const item = s.outbox.find(x => x.taskId === taskId && (x.id === old?.sendId ||
+      commandId && get('sendStage.' + x.id)?.commandId === commandId));
+    const receipt = result?.ok ? result.data : item && get('sendStage.' + item.id)?.stage === 'confirmed' ? { confirmed: true } : null;
+    if (receipt && item && s.entries[item.key] && ['uncertain', 'not-sent'].includes(item.status)) {
+      if (receipt.confirmed) { delete s.entries[item.key].handoff; s.entries[item.key].note = ''; }
+      item.payload ||= {};
+      settle(s, item, receipt);
+    }
+    if (commandId) GM_deleteValue(prefix + 'result.' + commandId);
+    log(s, old?.type === 'inspect' || old?.type === 'history' ?
+      '只读页面操作中断已恢复；旧指令已取消，继续原任务' :
+      '执行实例已恢复；未确认的发送仅标记对应会话待人工，其它任务继续');
+    persist(s);
+    if (result?.ok === false && (result.healthIssue || /检测到登录、验证或平台限制/.test(result.error || ''))) throw resultError(result);
   }
   async function pump() {
     if (busy || apiTesting || starting || !owned()) return;
@@ -1116,22 +1216,12 @@
       }
       return;
     }
-    if (s.task.leaseToken !== owner) {
-      const old = get('command');
-      if (old) {
-        put('cancel.' + old.id, true);
-        quarantinePending(s);
-        put('command', null);
-        // Never reissue an operation after a leader crash, even if its result is unknown.
-        s.task.status = 'paused'; log(s, '上次页面操作被中断，请核对记录后重新启动');
-      }
-      s.task.leaseToken = owner; persist(s);
-      if (s.task.status !== 'running') return;
-    }
     busy = true; const taskId = s.task.id; let actionContext = null;
     try {
+      if (s.task.leaseToken !== owner) { await recoverExecution(taskId); return; }
       validSetup(c);
       const adapter = new Adapter(document, c.profile); adapter.health();
+      if (s.task.healthProbe) { delete s.task.healthProbe; log(s, '页面复查通过，自动继续原任务'); persist(s); }
       if (!location.pathname.includes('/web/geek/jobs')) throw new Error('主标签页已离开搜索页，暂停任务');
       if (c.switchCategoryOnExhausted && s.task.currentCategory && !s.task.categoryPending) {
         try {
@@ -1263,7 +1353,8 @@
       log(s, `已读取职位：${job.title || job.jobId}；${s.entries[key].status}`); persist(s);
     } catch (e) {
       if (owned() && state().task?.id === taskId && state().task.status === 'running') {
-        if (actionContext && !globalFailure(e) && still(taskId)) skipAction(actionContext, e, taskId);
+        if (e.code === 'PAGE_HEALTH' && !actionContext) waitForPageHealth(e);
+        else if (actionContext && !globalFailure(e) && still(taskId)) skipAction(actionContext, e, taskId);
         else stop(e.message);
       }
     } finally {
@@ -1295,13 +1386,13 @@
     put(key + owner, { ...claim, expires: now + 15000 });
     return now - claim.claimedAt >= 1200;
   }
-  function workerGuard(cmd, sending = false) {
+  function workerGuard(cmd, sending = false, checkHealth = true) {
     const s = state(), c = config(), active = get('command');
     if (get('cancel.' + cmd.id) || get('stopRequest') || !active || active.id !== cmd.id ||
       cmd.owner !== winner() || s.task?.leaseToken !== cmd.owner || s.task?.id !== cmd.taskId ||
       !C.allowed(s, c, Date.now()) || Date.now() - cmd.createdAt > 90000 || !workerOwns()) throw new Error('工作指令过期或任务已停止');
     if (sending && (!c.autoSend || !s.outbox.some(x => x.id === cmd.sendId && x.status === 'pending' && x.taskId === cmd.taskId))) throw new Error('没有有效的发送预约');
-    new Adapter(document, c.profile).health();
+    if (checkHealth) new Adapter(document, c.profile).health();
     return c;
   }
   function workerPhase(cmd, phase, extra = {}) { Object.assign(cmd, extra, { phase }); put('command', cmd); }
@@ -1313,7 +1404,8 @@
     workerGuard(cmd); location.assign(url.href);
   }
   function workerFinish(cmd, data, error) {
-    put('result.' + cmd.id, error ? { ok: false, error } : { ok: true, data });
+    put('result.' + cmd.id, error ? { ok: false, error: error.message || error,
+      ...(error.healthIssue ? { healthIssue: error.healthIssue } : {}) } : { ok: true, data });
     closeWorkerSelf();
   }
   async function verifyReceipt(adapter, cmd, before, resumeName) {
@@ -1342,6 +1434,7 @@
     workerBusy = true;
     try {
       const sending = ['contact', 'reply', 'resume', 'openOnly'].includes(cmd.type), c = workerGuard(cmd, sending);
+      if (cmd.healthCheck) { delete cmd.healthCheck; put('command', cmd); }
       const adapter = new Adapter(document, c.profile, Object.values(state().entries).map(entry => entry.job), { verifyChatWindow: c.verifyChatWindow }), job = cmd.args.job;
       // Persist BEFORE any side effect. After reload, never repeat an uncertain click.
       if (get('consumed.' + cmd.id)) {
@@ -1444,7 +1537,22 @@
       const confirmed = await verifyReceipt(adapter, cmd, before);
       if (confirmed) sendStage(cmd, 'confirmed');
       workerFinish(cmd, { confirmed, reason: confirmed ? '' : '消息发送回执未确认' });
-    } catch (e) { workerFinish(cmd, null, e.message); }
+    } catch (e) {
+      if (e.code === 'PAGE_HEALTH' && !get('consumed.' + cmd.id)) {
+        const now = Date.now(), kind = e.healthIssue.kind;
+        if (!cmd.healthCheck || cmd.healthCheck.kind !== kind) {
+          cmd.healthCheck = { kind, firstAt: now }; put('command', cmd);
+        }
+        if (now - cmd.healthCheck.firstAt < 5000) return;
+        // Reload only a read-only operation with a temporary network/server error.
+        if (kind === 'transient' && ['inspect', 'history'].includes(cmd.type) && !cmd.healthCheck.refreshed) {
+          try { workerGuard(cmd, false, false); } catch (guardError) { workerFinish(cmd, null, guardError); return; }
+          cmd.healthCheck.refreshed = true; cmd.healthCheck.firstAt = now;
+          put('command', cmd); location.reload(); return;
+        }
+      }
+      workerFinish(cmd, null, e);
+    }
     finally { workerBusy = false; }
   }
 
@@ -1589,12 +1697,13 @@
   function currentActivity() {
     const s = state(), cmd = get('command');
     if (s.task?.status !== 'running') return '';
+    if (s.task.healthProbe) return '当前动作：页面异常自动复查中，暂不执行发送';
     if (activeRequest) return '';
     if (s.task.categoryPending) return '当前动作：等待岗位类别切换 · ' + s.task.categoryPending.label;
     if (cmd?.taskId === s.task.id) {
       const labels = { inspect: '读取职位详情', history: '检查已联系会话', contact: '首聊流程', reply: '回复流程', resume: '附件流程', openOnly: '仅打开沟通' };
       const elapsed = Math.max(0, Math.floor((Date.now() - cmd.createdAt) / 1000));
-      return `当前动作：${labels[cmd.type] || '页面操作'} · 阶段 ${cmd.phase} · 已等待${elapsed}秒 / 上限90秒` +
+      return (cmd.healthCheck ? '页面异常自动复查中 · ' : '') + `当前动作：${labels[cmd.type] || '页面操作'} · 阶段 ${cmd.phase} · 已等待${elapsed}秒 / 上限90秒` +
         (get('workerRegistered.' + cmd.workerId) ? '' : ' · 等待后台工作页加载并注册脚本');
     }
     if (busy) return '当前动作：正在处理任务；若正在重试，请查看运行记录';
@@ -1635,7 +1744,7 @@
     q('logs').textContent = s.logs.slice(0, 30).map(x => fmt(x.at) + ' ' + x.message).join('\n'); q('logs').style.whiteSpace = 'pre-wrap';
   }
   if (typeof module === 'object' && module.exports) {
-    module.exports = { renewLease, start, requestStart, stop, pump, analyze, testConnection, approveContactRetry, settle, chatDecision, requestAI, command, closeManagedWorker, disableAutoSend, requestClearActivity, completeClearActivity, quarantinePending, currentActivity }; return;
+    module.exports = { renewLease, releaseLease, start, requestStart, stop, pump, analyze, testConnection, approveContactRetry, settle, chatDecision, requestAI, command, closeManagedWorker, disableAutoSend, requestClearActivity, completeClearActivity, quarantinePending, currentActivity }; return;
   }
   if (workerId) {
     const banner = document.createElement('div'); banner.textContent = `AI 求职工作标签页 v${VERSION} · 请勿手动切换会话或输入消息 · 停止请在主搜索页操作`;
@@ -1655,7 +1764,8 @@
       if (owned() && s.task?.status === 'running' && !C.allowed(s, config(), Date.now())) stop('已到停止时间，取消全部排队操作');
       render(); pump();
     }, 1000);
-    addEventListener('pagehide', () => { /* lease expires; persistent task/outbox survive refresh */ });
+    addEventListener('pagehide', releaseLease);
+    addEventListener('pageshow', () => { retiring = false; renewLease(); pump(); });
     document.addEventListener('visibilitychange', () => { if (!document.hidden) { renewLease(); pump(); } });
   }
 })();

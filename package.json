@@ -1,6 +1,6 @@
 {
   "name": "boss-ai-userscript",
-  "version": "0.1.27",
+  "version": "0.1.30",
   "private": true,
   "description": "Local-first BOSS AI userscript with guarded DOM automation",
   "scripts": {

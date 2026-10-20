@@ -26,6 +26,98 @@ function runtime(overrides = {}, shared = null, clockOffset = 0) {
 function quickRetryTimers(r) {
   r.context.setTimeout = (fn, ms) => setTimeout(fn, ms === 1000 || ms === 2000 ? 0 : ms);
 }
+
+function failHealth(r, kind) {
+  r.context.BossAdapter.Adapter.prototype.health = () => {
+    const e = new Error('页面异常'); e.code = 'PAGE_HEALTH'; e.healthIssue = { kind }; throw e;
+  };
+}
+test('main temporary failure preserves task, avoids rapid refresh and resumes after clearing', async () => {
+  const r = runtime(); r.api.start(); const id = r.state().task.id;
+  let reloads = 0; r.location.reload = () => reloads++;
+  failHealth(r, 'transient'); await r.api.pump();
+  assert.equal(r.state().task.status, 'running'); assert.ok(r.state().task.healthProbe);
+  r.advance(6000); await r.api.pump(); assert.equal(reloads, 1);
+  r.advance(6000); await r.api.pump(); assert.equal(reloads, 1);
+  r.context.BossAdapter.Adapter.prototype.health = () => {};
+  r.context.BossAdapter.Adapter.prototype.cards = () => [];
+  r.context.BossAdapter.Adapter.prototype.advance = () => false;
+  await r.api.pump();
+  assert.equal(r.state().task.id, id); assert.equal(r.state().task.status, 'running');
+  assert.equal(r.state().task.healthProbe, undefined);
+});
+test('persistent temporary errors reload with bounded backoff across page instances', async () => {
+  let r = runtime(); r.api.start(); const id = r.state().task.id;
+  r.state().task.contacts = 7; r.state().lastSendAt = 123;
+  const initial = r.context.Date.now(); let reloads = 0;
+  function brokenPage() { r.location.reload = () => reloads++; failHealth(r, 'transient'); }
+  brokenPage(); await r.api.pump(); r.advance(6000); await r.api.pump();
+  assert.equal(reloads, 1); assert.equal(r.state().task.healthProbe.retryAt - r.context.Date.now(), 60000);
+  r.api.releaseLease();
+  const offset = r.context.Date.now() - initial + 2000;
+  r = runtime({}, r.store, offset); brokenPage();
+  await r.api.pump(); // Recover the old execution token first.
+  await r.api.pump(); assert.equal(reloads, 1);
+  for (const delay of [120000, 240000, 480000, 600000, 600000]) {
+    const due = r.state().task.healthProbe.retryAt;
+    const remaining = due - r.context.Date.now();
+    // Keep the execution lease alive while moving the fake clock.
+    for (let elapsed = 0; elapsed < remaining; elapsed += 5000) r.advance(Math.min(5000, remaining - elapsed));
+    await r.api.pump();
+    assert.equal(r.state().task.healthProbe.retryAt - r.context.Date.now(), delay);
+  }
+  assert.equal(reloads, 6); assert.equal(r.state().task.id, id);
+  assert.equal(r.state().task.contacts, 7); assert.equal(r.state().lastSendAt, 123);
+});
+
+test('normal refresh releases only its own lease and the next page recovers the same task promptly', async () => {
+  const original = runtime(); original.api.start(); const id = original.state().task.id;
+  const oldOwner = original.state().task.leaseToken;
+  const other = runtime({}, original.store, 0);
+  assert.equal(other.api.renewLease(), false);
+  original.api.releaseLease();
+  assert.equal(original.store.has('bossai.v1.lease.' + oldOwner), false);
+  assert.ok(original.store.size > 0);
+  assert.equal(other.api.renewLease(), true);
+  await other.api.pump();
+  assert.equal(other.state().task.id, id); assert.equal(other.state().task.status, 'running');
+  assert.notEqual(other.state().task.leaseToken, oldOwner);
+  assert.equal(original.api.renewLease(), false);
+  const newOwner = other.state().task.leaseToken;
+  await original.api.pump(); assert.equal(other.state().task.leaseToken, newOwner);
+});
+
+test('an unreleased live tab still excludes competitors until its lease expires', () => {
+  const a = runtime(); a.api.start(); const b = runtime({}, a.store, 0);
+  assert.equal(b.api.renewLease(), false); assert.equal(a.api.renewLease(), true);
+  b.advance(16000); b.advance(2000); assert.equal(b.api.renewLease(), true);
+});
+test('stop time prevents a scheduled transient recovery refresh', async () => {
+  const r = runtime({ scheduleEnabled: true, startTime: '09:00', stopTime: '11:00' }); r.api.start();
+  let reloads = 0; r.location.reload = () => reloads++; failHealth(r, 'transient');
+  await r.api.pump(); r.advance(6000); await r.api.pump(); assert.equal(reloads, 1);
+  r.state().task.endAt = r.context.Date.now(); await r.api.pump();
+  assert.notEqual(r.state().task.status, 'running'); assert.equal(reloads, 1);
+});
+test('persistent real verification pauses after passive recheck and never reloads', async () => {
+  const r = runtime(); r.api.start(); let reloads = 0; r.location.reload = () => reloads++;
+  failHealth(r, 'verification'); await r.api.pump(); assert.equal(r.state().task.status, 'running');
+  r.advance(6000); await r.api.pump(); assert.notEqual(r.state().task.status, 'running'); assert.equal(reloads, 0);
+});
+test('manual stop during health recovery prevents refresh and further actions', async () => {
+  const r = runtime(); r.api.start(); let reloads = 0; r.location.reload = () => reloads++;
+  failHealth(r, 'transient'); await r.api.pump(); r.api.stop('手动停止', true);
+  r.advance(6000); await r.api.pump(); assert.equal(reloads, 0); assert.equal(r.state().task.status, 'stopped');
+});
+test('worker health metadata preserves global challenges versus local temporary failures', async () => {
+  for (const kind of ['verification', 'login', 'restriction', 'transient']) {
+    const r = runtime({ autoSend: true }); r.api.start(); const entry = chatEntry(r, kind);
+    workerStub(r, () => ({ ok: false, error: '页面异常', healthIssue: { kind } }));
+    await r.api.pump();
+    assert.equal(r.state().task.status === 'running', kind === 'transient');
+    if (kind === 'transient') assert.equal(r.state().entries[entry.key].handoff, true);
+  }
+});
 function modelResult() {
   return { scoreBreakdown: { skills: 27, experience: 17, requirements: 18, preferences: 18, bonus: 0 }, hasBonusRequirements: true,
     suitable: true, uncertain: false, reason: '匹配', doubts: [], greeting: '您好，我开发过前端项目', greetingEvidence: ['开发过前端项目'] };
@@ -46,6 +138,75 @@ function chatEntry(r, id) {
   const key = C.pair(job), entry = { key, job, status: 'contacted' };
   r.state().entries[key] = entry; r.state().task.nextChatAt = 0; return entry;
 }
+
+function interruptedExecution(type = 'inspect', stage = 'clicked', data = null) {
+  const original = runtime({ autoSend: true }); original.api.start();
+  const s = original.state(), taskId = s.task.id;
+  const job = { jobId: 'interrupted', recruiterId: 'recruiter', url: 'https://www.zhipin.com/job_detail/interrupted.html' };
+  const key = C.pair(job); s.entries[key] = { key, job, status: type === 'contact' ? 'uncertain' : 'contacted' };
+  const command = { id: 'old-command', workerId: 'old-worker', taskId, owner: s.task.leaseToken, type, args: { job }, createdAt: original.context.Date.now() };
+  if (['contact', 'reply', 'resume', 'openOnly'].includes(type)) {
+    command.sendId = 'old-send'; s.outbox.push({ id: 'old-send', taskId, kind: type, key, status: 'pending', payload: {}, stage: 'reserved' });
+    s.task.contacts = 6; s.lastSendAt = original.context.Date.now();
+    original.store.set('bossai.v1.sendStage.old-send', { stage, commandId: command.id });
+    if (stage === 'clicked' || stage === 'confirmed') original.store.set('bossai.v1.consumed.' + command.id, true);
+  }
+  original.store.set('bossai.v1.command', command);
+  original.store.set('bossai.v1.activeWorker', { id: command.workerId, commandId: command.id });
+  original.store.set('bossai.v1.workerRegistered.' + command.workerId, true);
+  if (data) original.store.set('bossai.v1.result.' + command.id, { ok: true, data });
+  const restored = runtime({ autoSend: true }, original.store, 20000);
+  restored.context.GM_getTabs = callback => callback({});
+  return { ...restored, key, taskId, command };
+}
+
+test('leadership change cancels interrupted read commands and continues the same task', async () => {
+  for (const type of ['inspect', 'history']) {
+    const r = interruptedExecution(type); let opened = 0;
+    r.context.GM_openInTab = () => { opened++; assert.fail('recovery only cleans the old worker'); };
+    await r.api.pump();
+    assert.equal(r.state().task.status, 'running'); assert.equal(r.state().task.id, r.taskId);
+    assert.equal(r.store.get('bossai.v1.command'), null); assert.equal(r.store.get('bossai.v1.cancel.old-command'), true);
+    assert.equal(r.store.get('bossai.v1.activeWorker'), null); assert.equal(r.state().entries[r.key].handoff, undefined);
+    assert.equal(opened, 0);
+  }
+});
+
+test('uncertain sends are quarantined per conversation without replay or task reset on takeover', async () => {
+  for (const type of ['contact', 'reply', 'resume', 'openOnly']) {
+    const r = interruptedExecution(type); await r.api.pump();
+    assert.equal(r.state().task.status, 'running'); assert.equal(r.state().task.contacts, 6);
+    assert.equal(r.state().outbox[0].status, 'uncertain'); assert.equal(r.state().entries[r.key].handoff, true);
+    assert.equal(r.store.get('bossai.v1.command'), null);
+    assert.equal(r.state().outbox.length, 1);
+  }
+});
+
+test('confirmed worker receipts survive takeover even if the result was not consumed by the old main page', async () => {
+  for (const result of [{ confirmed: true }, null]) {
+    const r = interruptedExecution('contact', 'confirmed', result); await r.api.pump();
+    assert.equal(r.state().task.status, 'running'); assert.equal(r.state().outbox[0].status, 'sent');
+    assert.equal(r.state().entries[r.key].status, 'contacted'); assert.equal(r.state().entries[r.key].handoff, undefined);
+    assert.equal(r.state().task.contacts, 6);
+  }
+});
+
+test('manual stop during recovery is respected and a pending cleanup cannot be run twice', async () => {
+  const r = interruptedExecution('inspect'); let callback, queries = 0;
+  r.context.GM_getTabs = cb => { queries++; callback = cb; };
+  const first = r.api.pump(); await new Promise(resolve => setImmediate(resolve));
+  await r.api.pump(); assert.equal(queries, 1);
+  r.api.stop('用户停止', true); callback({}); await first;
+  assert.equal(r.state().task.status, 'stopped'); assert.equal(r.state().task.id, r.taskId);
+});
+
+test('recovery still pauses if an old worker cannot be closed', async () => {
+  const r = interruptedExecution('inspect');
+  r.context.GM_getTabs = cb => cb({ old: { bossAIWorkerId: 'old-worker' } });
+  r.context.setTimeout = (fn, ms) => setTimeout(fn, ms === 200 ? 0 : ms);
+  await r.api.pump(); assert.equal(r.state().task.status, 'paused');
+  assert.ok(r.state().logs.some(x => x.message.includes('旧工作页关闭未确认')));
+});
 
 test('slow chat polling schedules its next turn from completion so job scanning gets a turn', async () => {
   const r = runtime({ autoSend: true, refreshMinSeconds: 10, refreshMaxSeconds: 15 }); r.api.start(); chatEntry(r, 'slow');
@@ -219,7 +380,7 @@ test('unconfirmed category switching falls back to refresh without repeated clic
 test('a persisted category transition resumes after reload and expired tasks cannot click categories', async () => {
   const r = runtime(); r.api.start(); r.state().task.categoryPending = { label: 'Python(北京)', before: 'old', at: r.context.Date.now() };
   const restored = runtime({}, r.store, 25000); restored.context.BossAdapter.Adapter.prototype.categoryChanged = () => true;
-  await restored.api.pump(); assert.equal(restored.state().task.categoryPending, undefined);
+  await restored.api.pump(); await restored.api.pump(); assert.equal(restored.state().task.categoryPending, undefined);
   restored.state().task.exhausted = true; restored.state().task.endAt = 1;
   restored.context.BossAdapter.Adapter.prototype.clickCategory = () => assert.fail('expired tasks must not click');
   await restored.api.pump(); assert.equal(restored.state().task.status, 'paused');
