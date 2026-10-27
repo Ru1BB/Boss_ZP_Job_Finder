@@ -19,7 +19,7 @@
   ].map(Object.freeze));
   const scoringPrompt = '采用固定100分制，按以下分项给分：' + SCORING.map(x => `${x.key}（${x.label}）0到${x.max}分`).join('；') + '。' +
     '先将岗位条款分为核心职责、明确必需条件、非必需加分条件。“加分项”“有下列经历者优先”“优先考虑”“有则更佳”“nice to have”“plus”等非必需条款只影响bonus，合计最多10分；缺少它们不得在skills、experience、requirements或preferences重复扣分，不得因此认定不适合。若同一技能在另一条款明确列为必须，则按必需条件评估，但同一缺口仍不得重复扣分。' +
-    'skills评价完成核心工作的技能基础，experience评价相关项目、成果及可迁移能力，requirements评价明确必需的专业、学历、年级、实习时长等，preferences评价用户提供的岗位方向等偏好。北京及实习类型由脚本先过滤，不重复扣分。' +
+    'skills评价完成核心工作的技能基础，experience评价相关项目、成果及可迁移能力，requirements评价明确必需的专业、学历、年级、实习时长等，preferences评价用户提供的岗位方向等偏好。城市及实习/全职类型由脚本和BOSS搜索筛选决定，不参与评分，不根据日薪或正文重新推断工作类型。' +
     '各分项按匹配程度给分：充分匹配可得该项满分的90%到100%，大部分匹配75%到89%，部分匹配50%到74%，明显不匹配0%到49%。没有证据时不能当作已经掌握；未提及与明确不满足应区别说明，可迁移经历可以获得部分分数。信息缺失写入doubts，不在其他分项再次扣同一缺口。' +
     'hasBonusRequirements表示岗位是否列有非必需加分条件。有加分条件但简历没有相应证据时bonus可以为0；没有任何加分条款时hasBonusRequirements=false，bonus按10分中性计入，避免因岗位没有写加分项而降低总分。' +
     'reason说明各分项得分依据及主要扣分原因，区分必需条件与加分条件。总分由脚本加总，不自行另设权重、惩罚或一票否决。用户补充筛选要求可以说明偏好，但不改变本评分权重。';
@@ -241,19 +241,16 @@
     return s;
   }
   function hardFilter(job, c) {
-    const type = job.employmentType || '', city = job.city || '';
-    const text = [job.title, type, job.description].filter(Boolean).join('\n');
-    const excludesInternship = /(?:不接受|不招(?:收|聘)?|不要(?!求)|不考虑|拒绝|谢绝)\s*(?:任何|在校)?\s*(?:的)?实习(?:生)?|非实习(?:岗|岗位)|实习(?:生)?\s*(?:勿投|勿扰|不招|不考虑|除外)/.test(text);
-    const internshipText = /实习/.test(text);
-    const dailySalary = /日薪|[\/／]\s*[天日]|按[天日](?:计薪|计酬|计算|结算)|每[天日]\s*\d|(?:元|块)\s*一[天日]/.test(job.salary || '');
+    const city = job.city || '';
     if (c.requiredCity && city && !city.startsWith(c.requiredCity)) return { status: 'rejected', reason: '工作地点不在' + c.requiredCity };
-    if (c.internshipOnly && excludesInternship) return { status: 'rejected', reason: '岗位明确不接受实习，否定说明优先于实习关键词或日薪' };
-    if (c.internshipOnly && !internshipText && !dailySalary) {
-      if (/全职|正式|兼职/.test(type)) return { status: 'rejected', reason: '未包含实习文本且薪资不是日薪' };
-      return { status: 'review', reason: '未找到实习文本或明确日薪，需人工确认' };
-    }
     if (c.requiredCity && !city) return { status: 'review', reason: '工作地点缺少可靠字段，需人工确认' };
     return { status: 'pass', reason: '' };
+  }
+  function employmentUrl(url, c) {
+    const u = new URL(url);
+    if (u.origin !== 'https://www.zhipin.com' || u.pathname !== '/web/geek/jobs' || u.username || u.password) fail('工作类型只能在BOSS职位搜索页设置');
+    u.searchParams.set('jobType', c.internshipOnly ? '1902' : '1901');
+    return u.href;
   }
   function reserve(s, c, now, kind, entry, payload) {
     if (!canSend(s, c, now, kind, entry)) fail('当前不允许发送');
@@ -270,6 +267,27 @@
   function leaseWinner(claims, now) {
     return claims.filter(c => c && c.expires > now).sort((a, b) => a.claimedAt - b.claimedAt || a.owner.localeCompare(b.owner))[0]?.owner ?? null;
   }
+  function temporaryFailure(error) {
+    if (error?.code === 'PAGE_HEALTH') return error.healthIssue?.kind === 'transient';
+    return /未加载|尚未加载|加载失败|未找到聊天容器|等待.*超时|页面操作超时|操作按钮不可用|工作页在读取完成前已关闭/.test(error?.message || '');
+  }
+  function runtimeStats(s) {
+    const entries = Object.values(s.entries), sends = s.outbox.filter(x => x.kind !== 'openOnly');
+    return { analyzed: entries.filter(e => Number.isFinite(e.analysis?.score)).length,
+      eligible: entries.filter(e => e.status === 'eligible' && !e.handoff).length + sends.filter(x => x.status === 'pending').length,
+      sent: sends.filter(x => x.status === 'sent').length,
+      uncertain: sends.filter(x => x.status === 'uncertain').length,
+      retrying: entries.filter(e => e.retry && !e.handoff).length,
+      manual: entries.filter(e => e.handoff || e.status === 'review' && !e.retry).length };
+  }
+  function compactHistory(s, now) {
+    let compacted = 0;
+    for (const item of s.outbox) if (item.status !== 'pending' && item.status !== 'uncertain' &&
+      item.createdAt && item.createdAt < now - 30 * 86400000 && item.payload && !item.compactedAt) {
+      delete item.payload; item.compactedAt = now; compacted++;
+    }
+    return compacted;
+  }
   return { AI_NOTICE, PROJECT_INTRO, PROJECT_URL, aiMessage, anonymousMessage, greetingMessage, isAIOutgoing, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, parseJSON, analysis, reply, pair,
-    sensitive, wantsResume, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner };
+    sensitive, wantsResume, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner, temporaryFailure, runtimeStats, compactHistory, employmentUrl };
 });

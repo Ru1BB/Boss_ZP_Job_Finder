@@ -6,7 +6,7 @@ const C = require('../src/core.js');
 const source = fs.readFileSync(require('node:path').join(__dirname, '../src/app.js'), 'utf8');
 function runtime(overrides = {}, shared = null, clockOffset = 0) {
   let now = Date.parse('2026-10-14T02:00:00Z') + clockOffset;
-  const store = shared || new Map(), location = { href: 'https://www.zhipin.com/web/geek/jobs', pathname: '/web/geek/jobs', hash: '', reload() {} };
+  const store = shared || new Map(), location = { href: 'https://www.zhipin.com/web/geek/jobs?jobType=1902', pathname: '/web/geek/jobs', hash: '', reload() {} };
   const c = { ...C.defaults(), apiKey: 'fake-test-key', resume: '熟悉 JavaScript，开发过前端项目。', ...overrides };
   store.set('bossai.v1.config', c);
   class Clock extends Date { static now() { return now; } }
@@ -115,7 +115,7 @@ test('worker health metadata preserves global challenges versus local temporary 
     workerStub(r, () => ({ ok: false, error: '页面异常', healthIssue: { kind } }));
     await r.api.pump();
     assert.equal(r.state().task.status === 'running', kind === 'transient');
-    if (kind === 'transient') assert.equal(r.state().entries[entry.key].handoff, true);
+    if (kind === 'transient') { assert.equal(r.state().entries[entry.key].handoff, false); assert.equal(r.state().entries[entry.key].retry.action, 'history'); }
   }
 });
 function modelResult() {
@@ -138,6 +138,106 @@ function chatEntry(r, id) {
   const key = C.pair(job), entry = { key, job, status: 'contacted' };
   r.state().entries[key] = entry; r.state().task.nextChatAt = 0; return entry;
 }
+
+test('work type changes navigate before any job or send action and preserve the task', async () => {
+  const r = runtime({ internshipOnly: false }); r.api.start(); const id = r.state().task.id;
+  let target = ''; r.location.assign = url => { target = url; };
+  r.context.BossAdapter.Adapter.prototype.cards = () => { assert.fail('must navigate first'); };
+  await r.api.pump(); assert.equal(new URL(target).searchParams.get('jobType'), '1901');
+  assert.equal(r.state().task.id, id); assert.equal(r.state().task.contacts, 0);
+  assert.ok(r.state().task.employmentSync);
+});
+
+test('read-only temporary errors retry twice then hand off only that job', async () => {
+  const r = runtime(); r.api.start();
+  r.context.BossAdapter.Adapter.prototype.cards = () => [{ jobId: 'j', url: 'https://www.zhipin.com/job_detail/j.html' }];
+  workerStub(r, () => ({ ok: false, error: '职位详情未加载' }));
+  await r.api.pump(); let entry = Object.values(r.state().entries)[0];
+  assert.equal(entry.retry.attempt, 1); assert.equal(entry.handoff, false);
+  for (const delay of [60000, 120000]) {
+    for (let i = 0; i < delay / 5000; i++) r.advance(5000);
+    await r.api.pump();
+  }
+  entry = Object.values(r.state().entries)[0];
+  assert.equal(entry.retry, undefined); assert.equal(entry.handoff, true);
+  assert.equal(r.state().task.status, 'running'); assert.ok(r.state().task.visited.includes('j'));
+});
+test('manual stop cancels persisted delayed retries without starting any new page', async () => {
+  const r = runtime({ autoSend: true }); r.api.start(); const entry = chatEntry(r, 'cancel-retry');
+  entry.retry = { action: 'history', taskId: r.state().task.id, at: r.context.Date.now() + 60000, attempt: 1 };
+  r.api.stop('用户停止', true); assert.equal(r.state().entries[entry.key].retry, undefined);
+  r.context.GM_openInTab = () => { assert.fail('stopped retry must not open a tab'); };
+  for (let i = 0; i < 13; i++) r.advance(5000);
+  await r.api.pump(); assert.equal(r.state().task.status, 'stopped');
+});
+
+test('successful delayed history retry clears the temporary failure and resumes polling', async () => {
+  const r = runtime({ autoSend: true }); r.api.start(); const entry = chatEntry(r, 'temporary'); let calls = 0;
+  workerStub(r, () => ++calls === 1 ? { ok: false, error: '等待聊天窗口超时' } : { ok: true, data: [] });
+  await r.api.pump(); assert.equal(r.state().entries[entry.key].retry.attempt, 1);
+  for (let i = 0; i < 13; i++) r.advance(5000);
+  r.state().task.nextChatAt = 0; await r.api.pump();
+  assert.equal(calls, 2); assert.equal(r.state().entries[entry.key].retry, undefined);
+  assert.equal(r.state().entries[entry.key].handoff, false);
+});
+
+test('temporary send failure before any page click retries the existing reservation once without extra quota', async () => {
+  const r = runtime({ autoSend: true, sendIntervalSeconds: 1 }); r.api.start();
+  const job = { jobId: 'safe', recruiterId: 'r', url: 'https://www.zhipin.com/job_detail/safe.html' }, key = C.pair(job);
+  r.state().entries[key] = { key, job, status: 'eligible', taskId: r.state().task.id, analysis: { greeting: '您好，我有项目经验' } };
+  let calls = 0;
+  workerStub(r, () => ++calls === 1 ? { ok: false, error: '操作按钮不可用' } : { ok: true, data: { confirmed: true } });
+  await r.api.pump(); assert.equal(r.state().entries[key].retry.action, 'send'); assert.equal(r.state().task.contacts, 1);
+  for (let i = 0; i < 13; i++) r.advance(5000);
+  await r.api.pump(); assert.equal(calls, 2); assert.equal(r.state().task.contacts, 1);
+  assert.equal(r.state().outbox.length, 1); assert.equal(r.state().outbox[0].status, 'sent');
+});
+
+test('temporary errors after opening or clicking send never schedule automatic replays', async () => {
+  for (const stage of ['opening', 'drafting', 'clicked']) {
+    const r = runtime({ autoSend: true }); r.api.start(); const entry = chatEntry(r, stage);
+    entry.pendingReply = { kind: 'reply', payload: { text: '您好' } };
+    workerStub(r, cmd => { r.store.set('bossai.v1.sendStage.' + cmd.sendId, { stage, commandId: cmd.id }); return { ok: false, error: '操作按钮不可用' }; });
+    await r.api.pump(); assert.equal(r.state().entries[entry.key].retry, undefined);
+    assert.equal(r.state().entries[entry.key].handoff, true);
+  }
+});
+test('safe delayed send reservations survive refresh without being turned into uncertain sends', async () => {
+  const original = runtime({ autoSend: true }); original.api.start(); const entry = chatEntry(original, 'queued');
+  const item = C.reserve(original.state(), original.c, original.context.Date.now(), 'reply', entry, { text: '您好' });
+  original.store.set('bossai.v1.sendStage.' + item.id, { stage: 'prepared', commandId: 'failed-before-opening' });
+  entry.retry = { action: 'send', sendId: item.id, taskId: original.state().task.id, at: original.context.Date.now() + 60000, attempt: 1 };
+  original.api.releaseLease(); const restored = runtime({ autoSend: true }, original.store, 2000);
+  await restored.api.pump();
+  assert.equal(restored.state().outbox[0].status, 'pending'); assert.equal(restored.state().entries[entry.key].handoff, undefined);
+  assert.equal(restored.state().entries[entry.key].retry.action, 'send');
+  restored.api.stop('手动停止', true); assert.equal(restored.state().outbox[0].status, 'not-sent');
+});
+
+test('maintenance deletes only aged temporary data and preserves uncertain send evidence', () => {
+  const r = runtime(); r.api.start(); const old = r.context.Date.now() - 8 * 86400000;
+  for (const key of ['result.old', 'consumed.protected']) { r.store.set('bossai.v1.' + key, true); r.store.set('bossai.v1.meta.' + key, old); }
+  r.state().outbox.push({ id: 'uncertain', status: 'uncertain', key: 'keep' });
+  r.store.set('bossai.v1.sendStage.uncertain', { stage: 'clicked', commandId: 'protected' });
+  const result = r.api.maintainRuntime(true);
+  assert.equal(result.removed, 1); assert.equal(r.store.has('bossai.v1.result.old'), false);
+  assert.equal(r.store.get('bossai.v1.consumed.protected'), true); assert.equal(r.state().outbox[0].status, 'uncertain');
+  assert.equal(r.api.maintainRuntime(), null);
+});
+
+test('AI resume organization is grounded in extracted text and does not save configuration automatically', async () => {
+  const r = runtime(); const source = '教育背景：本科在读。项目经历：开发过Python数据分析工具，负责测试与数据清洗。';
+  r.context.GM_xmlhttpRequest = args => { assert.equal(JSON.parse(args.data).messages.length, 2); respondAI(args,
+    { sections: [{ title: '项目经历', facts: ['开发过Python数据分析工具，负责测试与数据清洗。'] }] }); return { abort() {} }; };
+  const output = await r.api.generateResume(r.c, source);
+  assert.ok(output.includes('Python数据分析')); assert.equal(r.store.get('bossai.v1.config').resume, r.c.resume);
+});
+test('invalid or fabricated AI resume facts are retried three times and rejected', async () => {
+  const r = runtime(); quickRetryTimers(r); let calls = 0;
+  r.context.GM_xmlhttpRequest = args => { calls++; respondAI(args, { sections: [{ title: '项目经历', facts: ['十年架构经验'] }] }); return { abort() {} }; };
+  await assert.rejects(r.api.generateResume(r.c, '本科在读，熟悉Python，开发过软件测试和数据处理项目。'), /连续尝试3次/);
+  assert.equal(calls, 3);
+});
 
 function interruptedExecution(type = 'inspect', stage = 'clicked', data = null) {
   const original = runtime({ autoSend: true }); original.api.start();
@@ -308,7 +408,7 @@ test('login and platform restrictions still stop globally even inside a chat act
 test('an unreadable job is marked visited and later jobs are still inspected', async () => {
   const r = runtime(); r.api.start(); const seen = [];
   r.context.BossAdapter.Adapter.prototype.cards = () => ['first', 'second'].map(jobId => ({ jobId, url: 'https://www.zhipin.com/job_detail/' + jobId + '.html' }));
-  workerStub(r, cmd => { seen.push(cmd.args.job.jobId); return { ok: false, error: '职位详情未加载或选择器不匹配' }; });
+  workerStub(r, cmd => { seen.push(cmd.args.job.jobId); return { ok: false, error: '页面选择器无效，无法读取职位' }; });
   await r.api.pump(); assert.equal(r.state().task.status, 'running'); assert.ok(r.state().task.visited.includes('first'));
   r.advance(61000); r.advance(2000); await r.api.pump();
   await r.api.pump(); assert.deepEqual(seen, ['first', 'second']);
@@ -646,6 +746,69 @@ test('an unclosed old worker blocks new page creation', async () => {
   r.context.setTimeout = (fn, ms) => setTimeout(fn, ms === 200 ? 0 : ms);
   await assert.rejects(r.api.command('inspect', { job: {} }, r.state().task.id), /尚未关闭/);
   assert.equal(opened, 0);
+});
+
+test('confirmed handle closure overrides stale registry data and cleanup stays idempotent', async () => {
+  const r = runtime(); r.api.start();
+  r.store.set('bossai.v1.activeWorker', { id: 'old' });
+  let registryReads = 0;
+  r.context.GM_getTabs = cb => { registryReads++; cb({ old: { bossAIWorkerId: 'old' } }); };
+  const handle = { closed: false, close() { this.closed = true; } };
+  assert.equal(await r.api.closeManagedWorker('old', handle), true);
+  assert.equal(await r.api.closeManagedWorker('old'), true);
+  assert.equal(registryReads, 0); assert.equal(r.store.get('bossai.v1.activeWorker'), null);
+  assert.ok(r.store.get('bossai.v1.workerRetired.old'));
+  assert.equal(r.store.get('bossai.v1.closeWorker.old'), true);
+});
+
+test('registered workers need consecutive absent registry snapshots before retirement', async () => {
+  const r = runtime(); let reads = 0;
+  r.store.set('bossai.v1.activeWorker', { id: 'old' }); r.store.set('bossai.v1.workerRegistered.old', true);
+  r.context.setTimeout = (fn, ms) => setTimeout(fn, ms === 200 ? 0 : ms);
+  r.context.GM_getTabs = cb => { reads++; cb(reads === 2 ? { old: { bossAIWorkerId: 'old' } } : {}); };
+  assert.equal(await r.api.closeManagedWorker('old'), true); assert.equal(reads, 4);
+  assert.equal(await r.api.closeManagedWorker('old'), true);
+});
+
+test('unknown old workers never silently retire merely because the registry is empty', async () => {
+  const r = runtime(); r.store.set('bossai.v1.activeWorker', { id: 'unknown' });
+  r.context.setTimeout = (fn, ms) => setTimeout(fn, ms === 200 ? 0 : ms);
+  r.context.GM_getTabs = cb => cb({});
+  assert.equal(await r.api.closeManagedWorker('unknown'), false);
+  assert.equal(r.store.has('bossai.v1.workerRetired.unknown'), false);
+  assert.equal(r.store.get('bossai.v1.activeWorker').id, 'unknown');
+});
+
+test('manual stale-state cleanup requires confirmation and preserves uncertain send records', async () => {
+  for (const approved of [false, true]) {
+    const r = interruptedExecution('contact'); r.api.stop('停止', true);
+    r.store.delete('bossai.v1.workerRegistered.old-worker');
+    r.context.setTimeout = (fn, ms) => setTimeout(fn, ms === 200 ? 0 : ms);
+    let confirmations = 0; r.context.window = { confirm() { confirmations++; return approved; } };
+    await r.api.clearWorkerBlock();
+    assert.equal(confirmations, 1);
+    assert.equal(r.store.get('bossai.v1.activeWorker') === null, approved);
+    assert.equal(r.state().outbox[0].status, 'uncertain'); assert.equal(r.state().task.contacts, 6);
+    assert.equal(r.state().entries[r.key].handoff, true);
+    if (approved) assert.equal(r.store.get('bossai.v1.workerRetired.old-worker').manual, true);
+  }
+});
+
+test('manual cleanup refuses running tasks and still-visible worker tabs', async () => {
+  const r = runtime(); r.api.start();
+  await assert.rejects(r.api.clearWorkerBlock(), /先停止/);
+  r.api.stop('停止', true); r.store.set('bossai.v1.activeWorker', { id: 'old' });
+  r.context.setTimeout = (fn, ms) => setTimeout(fn, ms === 200 ? 0 : ms);
+  r.context.GM_getTabs = cb => cb({ old: { bossAIWorkerId: 'old' } });
+  r.context.window = { confirm() { assert.fail('visible worker must not be retired by confirmation'); } };
+  await assert.rejects(r.api.clearWorkerBlock(), /仍检测到旧工作页/);
+  assert.equal(r.store.has('bossai.v1.workerRetired.old'), false);
+});
+
+test('retiring an old id cannot clear a different active worker', async () => {
+  const r = runtime(); r.store.set('bossai.v1.activeWorker', { id: 'new' });
+  assert.equal(await r.api.closeManagedWorker('old', { closed: true, close() {} }), true);
+  assert.equal(r.store.get('bossai.v1.activeWorker').id, 'new');
 });
 test('revoking sending takes effect immediately without saving other form fields', () => {
   const r = runtime({ autoSend: true }); r.api.start();

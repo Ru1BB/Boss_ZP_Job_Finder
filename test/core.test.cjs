@@ -2,10 +2,32 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const C = require('../src/core.js');
 
-test('explicit internship exclusions override keywords and daily pay', () => {
+test('employment URL replaces duplicate types and preserves other search conditions', () => {
+  const url = 'https://www.zhipin.com/web/geek/jobs?city=101010100&query=Python&jobType=1903&jobType=1901#example';
+  const internship = new URL(C.employmentUrl(url, C.defaults()));
+  assert.deepEqual(internship.searchParams.getAll('jobType'), ['1902']);
+  assert.equal(internship.searchParams.get('query'), 'Python'); assert.equal(internship.hash, '#example');
+  assert.equal(new URL(C.employmentUrl(url, { internshipOnly: false })).searchParams.get('jobType'), '1901');
+  assert.throws(() => C.employmentUrl('https://other.example/web/geek/jobs', C.defaults()));
+});
+test('historical compaction preserves dedup keys, pending payloads and uncertain payloads', () => {
+  const s = C.emptyState(), old = 1;
+  for (const status of ['sent', 'pending', 'uncertain']) s.outbox.push({ id: status, key: 'job', kind: 'contact', status, createdAt: old, payload: { text: '旧正文' } });
+  assert.equal(C.compactHistory(s, 40 * 86400000), 1);
+  assert.equal(s.outbox[0].key, 'job'); assert.equal(s.outbox[0].payload, undefined);
+  assert.ok(s.outbox[1].payload); assert.ok(s.outbox[2].payload);
+  assert.equal(C.compactHistory(s, 40 * 86400000), 0);
+});
+test('runtime statistics separate confirmed sends from open-only actions and uncertain sends', () => {
+  const s = C.emptyState(); s.entries.a = { analysis: { score: 80 }, status: 'eligible' }; s.entries.b = { status: 'review', retry: {} };
+  s.outbox = [{ kind: 'contact', status: 'sent' }, { kind: 'openOnly', status: 'sent' }, { kind: 'reply', status: 'uncertain' }];
+  assert.deepEqual(C.runtimeStats(s), { analyzed: 1, eligible: 1, sent: 1, uncertain: 1, retrying: 1, manual: 0 });
+});
+
+test('employment wording and daily pay do not override BOSS search type', () => {
   for (const description of ['只招全职，不接受实习生', '不招实习生', '实习生勿投', '非实习岗位', '不考虑在校实习生', '谢绝实习生']) {
     for (const salary of ['20-30K', '200元/天']) {
-      assert.equal(C.hardFilter({ title: '后端开发', city: '北京', description, salary }, C.defaults()).status, 'rejected', description);
+      assert.equal(C.hardFilter({ title: '后端开发', city: '北京', description, salary }, C.defaults()).status, 'pass', description);
     }
   }
 });
@@ -101,7 +123,7 @@ test('legacy endpoint migration clears credentials only when destination changes
 });
 test('Beijing internship hard filter never infers from body mentioning the city', () => {
   const c = C.defaults();
-  assert.equal(C.hardFilter({ employmentType: '全职', city: '北京' }, c).status, 'rejected');
+  assert.equal(C.hardFilter({ employmentType: '全职', city: '北京' }, c).status, 'pass');
   assert.equal(C.hardFilter({ employmentType: '实习', city: '上海' }, c).status, 'rejected');
   assert.equal(C.hardFilter({ employmentType: '实习', city: '北京·海淀区' }, c).status, 'pass');
   assert.equal(C.hardFilter({ description: '北京实习生', employmentType: '', city: '' }, c).status, 'review');
@@ -114,10 +136,10 @@ test('internship text and daily salary are alternative positive signals', () => 
   }
   assert.equal(C.hardFilter({ description: '招聘开发实习生', salary: '4-6K/月', city: '北京' }, c).status, 'pass');
   assert.equal(C.hardFilter({ title: '实习生', city: '北京' }, c).status, 'pass');
-  assert.equal(C.hardFilter({ salary: '8-12K/月', city: '北京' }, c).status, 'review');
+  assert.equal(C.hardFilter({ salary: '8-12K/月', city: '北京' }, c).status, 'pass');
   assert.equal(C.hardFilter({ salary: '200元/天', city: '上海' }, c).status, 'rejected');
   assert.equal(C.hardFilter({ salary: '200元/天', city: '' }, c).status, 'review');
-  assert.equal(C.hardFilter({ description: '餐补20元/天', salary: '8K/月', employmentType: '全职', city: '北京' }, c).status, 'rejected');
+  assert.equal(C.hardFilter({ description: '餐补20元/天', salary: '8K/月', employmentType: '全职', city: '北京' }, c).status, 'pass');
 });
 test('AI disclosure is appended once to greetings and replies, including old queued text', () => {
   assert.equal(C.aiMessage('您好'), '您好');

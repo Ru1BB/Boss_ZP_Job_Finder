@@ -54,6 +54,7 @@ async function run(options = {}) {
   }
   for (const [key, value] of Object.entries({ config: c, state: s, command: cmd, 'lease.leader': { owner: 'leader', claimedAt: now - 1000, expires: now + 60000 } })) store.set('bossai.v1.' + key, value);
   if (options.consumed) store.set('bossai.v1.consumed.cmd', true);
+  if (options.retired) store.set('bossai.v1.workerRetired.worker', { at: now });
   if (options.expired) s.task.endAt = now - 1;
   let offset = 0;
   class Clock extends Date { static now() { return now + offset; } }
@@ -65,8 +66,8 @@ async function run(options = {}) {
     GM_getValue: (k, fallback = null) => store.has(k) ? structuredClone(store.get(k)) : fallback,
     GM_setValue: (k, v) => store.set(k, structuredClone(v)), GM_listValues: () => [...store.keys()], GM_deleteValue: k => store.delete(k),
     setInterval: f => callbacks.push(f), setTimeout: f => { f(); }, Event: class {},
-    window: { close() { events.push('closeWorker'); } },
-    GM_getTab: callback => callback({}), GM_saveTab() {},
+    window: { close() { events.push('closeWorker'); if (options.closeThrows) throw new Error('close failed'); } },
+    GM_getTab: callback => callback({}), GM_saveTab(tab, callback) { callback?.(); },
     GM_registerMenuCommand() {}, GM_openInTab() {}, addEventListener() {} };
   vm.runInNewContext(source, context);
   // Initial tick is async; drain its promises and any repeated tick deterministically.
@@ -79,6 +80,12 @@ async function run(options = {}) {
   }
   return { events, result: store.get('bossai.v1.result.cmd'), store, history };
 }
+
+test('retired late-loading workers cannot send and close attempts remain bounded', async () => {
+  const r = await run({ retired: true, closeThrows: true, extraTicks: 5 });
+  assert.equal(r.result, undefined); assert.equal(r.events.includes('send'), false);
+  assert.equal(r.events.includes('fill'), false); assert.equal(r.events.filter(x => x === 'closeWorker').length, 3);
+});
 
 test('temporary read failure refreshes once and then continues without sending', async () => {
   const r = await run({ type: 'history', healthKind: 'transient', recoverOnReload: true, extraTicks: 4 });

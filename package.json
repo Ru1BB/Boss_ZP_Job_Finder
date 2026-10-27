@@ -1,6 +1,6 @@
 {
   "name": "boss-ai-userscript",
-  "version": "0.1.30",
+  "version": "0.1.33",
   "private": true,
   "description": "Local-first BOSS AI userscript with guarded DOM automation",
   "scripts": {
@@ -9,5 +9,15 @@
     "check": "node --check src/core.js && node --check src/adapter.js && node --check src/app.js && node --check dist/boss-ai.user.js",
     "demo": "node scripts/demo.cjs"
   },
-  "engines": { "node": ">=18" }
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "dependencies": {
+    "fflate": "0.8.3",
+    "pdfjs-dist": "6.4.299"
+  },
+  "devDependencies": {
+    "@xmldom/xmldom": "0.9.12",
+    "esbuild": "0.28.2"
+  }
 }
