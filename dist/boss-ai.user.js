@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS AI 求职助手（试运行优先）
 // @namespace    local.boss-ai
-// @version      0.1.43
+// @version      0.1.45
 // @updateURL    https://7355608.site/userscripts/boss-ai.meta.js
 // @downloadURL  https://7355608.site/userscripts/boss-ai.user.js
 // @description  AI 职位筛选、受控沟通与北京时间调度；请先校准页面
@@ -375,12 +375,12 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     screeningPrompt: '综合考虑我的经历、技能和求职偏好，说明匹配理由与不确定性。',
     greetingPrompt: '用自然、简短的中文打招呼，突出真实匹配点，不编造经历，不承诺薪资或面试。',
     threshold: 80, maxContacts: 50, sendIntervalSeconds: 180, aiTimeoutSeconds: 180,
-    refreshMinSeconds: 10, refreshMaxSeconds: 60, maxReplies: 5,
+    refreshMinSeconds: 10, refreshMaxSeconds: 60,
     beforeOpenSeconds: 0, beforeFillSeconds: 0, beforeSendSeconds: 0, nextJobSeconds: 0,
     scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false,
     openRejected: true, verifiedEmptyContact: false,
     switchCategoryOnExhausted: true, debugMode: false,
-    resumeName: '', internshipOnly: true, requiredCity: '北京', profile: {}
+    internshipOnly: true, requiredCity: '北京', profile: {}
   });
   const fail = message => { throw new Error(message); };
   // Legacy marker: remove it from queued text and recognize old history; never append it.
@@ -413,13 +413,18 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     const normalize = text => String(text || '').replace(/\r\n?/g, '\n').replace(/[\u200b\ufeff]/g, '').replace(/\s+/g, ' ').trim();
     return message?.role === 'candidate' && !message.rich && !!normalize(expected) && normalize(message.text) === normalize(expected);
   }
-  function isAIOutgoing(message) {
-    return message?.role === 'candidate' && typeof message.text === 'string' && (message.text.includes('AI') || message.text.includes(PROJECT_INTRO));
+  function sanitizeProfile(profile) {
+    if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return profile;
+    const clean = { ...profile };
+    for (const key of ['verifiedReply', 'verifiedResume', 'resumeOpen', 'resumeDialog', 'resumeItem', 'resumeName',
+      'resumeSend', 'resumeReceipt', 'conversation', 'conversationRecruiterAttr', 'conversationJobAttr', 'conversationName', 'conversationCompany']) delete clean[key];
+    return clean;
   }
   function fixedConfig(raw = {}) {
     const provider = raw.provider ?? 'qwen';
     if (!Object.hasOwn(PROVIDERS, provider)) fail('不支持的供应商');
     const preset = PROVIDERS[provider], c = { ...defaults(), ...raw, ...preset, provider };
+    delete c.maxReplies; delete c.resumeName; c.profile = sanitizeProfile(c.profile);
     delete c.verifyChatWindow; // Retired option: chat identity is no longer compared.
     delete c.categoryLabels; // Retire the old manually entered category list.
     // Do not carry credentials from a previously configured different service to a new destination.
@@ -428,14 +433,14 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
   }
   function validateConfig(c, requireAI = false) {
     if (!Object.hasOwn(PROVIDERS, c.provider)) fail('不支持的供应商');
-    for (const key of ['baseUrl', 'model', 'apiKey', 'resume', 'preferences', 'screeningPrompt', 'greetingPrompt', 'resumeName', 'requiredCity']) {
+    for (const key of ['baseUrl', 'model', 'apiKey', 'resume', 'preferences', 'screeningPrompt', 'greetingPrompt', 'requiredCity']) {
       if (typeof c[key] !== 'string') fail(`配置 ${key} 必须是文字`);
     }
     for (const key of ['autoSend', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact', 'switchCategoryOnExhausted', 'debugMode']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
     for (const [key, min, max] of [['threshold', 0, 100], ['maxContacts', 1, 500],
       ['beforeOpenSeconds', 0, 3600], ['beforeFillSeconds', 0, 3600], ['beforeSendSeconds', 0, 3600], ['nextJobSeconds', 0, 3600],
       ['sendIntervalSeconds', 1, 86400], ['refreshMinSeconds', 1, 3600],
-      ['refreshMaxSeconds', 1, 3600], ['maxReplies', 1, 100], ['aiTimeoutSeconds', 30, 600]]) {
+      ['refreshMaxSeconds', 1, 3600], ['aiTimeoutSeconds', 30, 600]]) {
       if (!Number.isInteger(c[key]) || c[key] < min || c[key] > max) fail(`配置 ${key} 必须是 ${min}–${max} 的整数`);
     }
     if (c.refreshMaxSeconds < c.refreshMinSeconds) fail('随机等待上限不能小于下限');
@@ -444,7 +449,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     if (requireAI && (!c.baseUrl || !c.model.trim() || !c.apiKey.trim() || !c.resume.trim())) fail('请填写 API 地址、模型、Key 和简历文字');
     if (!c.profile || typeof c.profile !== 'object' || Array.isArray(c.profile)) fail('页面适配配置必须是 JSON 对象');
     for (const [key, value] of Object.entries(c.profile)) {
-      if (['verifiedContact', 'verifiedReply', 'verifiedResume', 'firstContactOpensEmptyChat'].includes(key)) {
+      if (['verifiedContact', 'firstContactOpensEmptyChat'].includes(key)) {
         if (typeof value !== 'boolean') fail('页面流程验证标记必须为 true 或 false');
       } else if (key !== 'version' && typeof value !== 'string') fail('页面选择器和属性名必须为文字');
     }
@@ -495,7 +500,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
   function parseJSON(s) {
     if (typeof s !== 'string' || s.length > 50000) fail('AI 返回内容无效');
     try { return JSON.parse(s.replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '')); }
-    catch { fail('AI 未返回有效 JSON，已暂停'); }
+    catch { fail('AI 未返回有效 JSON'); }
   }
   function analysis(raw) {
     const x = typeof raw === 'string' ? parseJSON(raw) : raw;
@@ -545,27 +550,11 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     if (history.some(m => m.role === 'candidate')) return 'manual-sent';
     return history.length ? 'incoming-or-unknown' : 'empty';
   }
-  function reply(raw) {
-    const x = typeof raw === 'string' ? parseJSON(raw) : raw;
-    if (!x || !['reply', 'resume', 'handoff'].includes(x.action) || typeof x.text !== 'string' ||
-      typeof x.reason !== 'string' || !Array.isArray(x.evidence) || !x.evidence.every(v => typeof v === 'string') ||
-      x.text.length > 1000 || (x.action === 'reply' && (!x.text.trim() || !x.evidence.length))) fail('AI 回复结果结构无效');
-    if (x.action === 'reply') x.text = aiMessage(x.text);
-    return x;
-  }
   function pair(job) {
     if (!job || !job.jobId || !job.recruiterId) fail('无法可靠识别岗位及招聘者');
     return JSON.stringify([String(job.recruiterId), String(job.jobId)]);
   }
   const sensitive = text => /面试|约面|几点|周[一二三四五六日天]|明天|后天|到岗|入职|薪资|工资|待遇|底薪|期望薪|报价|微信|手机号|电话|邮箱|身份证|银行卡|转账|付款|验证码|下载|安装|点击链接|加.{0,3}(微|v|V)/i.test(text);
-  function isRejection(text) {
-    // Match complete rejection phrases, not isolated words such as “拒绝”.
-    return String(text || '').split(/[。！？!?；;\n]+/).some(part => {
-      if (/如果|假如|万一|是否|并非|不是说|不是不|并不是|不代表|不意味着|不会拒绝|不拒绝|不予拒绝/.test(part)) return false;
-      return /(?:您的?|你的?)(?:背景|经验|经历|技能|条件|简历|专业|能力).{0,40}(?:不(?:太|完全)?(?:符合|匹配|吻合|适合)|尚不符合|未(?:能)?达到)|(?:您|你|同学).{0,12}(?:不太适合|不符合.{0,12}要求)|(?:岗位|职位|需求|要求).{0,20}(?:与您|与你|和您|和你).{0,15}不(?:太)?匹配|(?:暂时|目前|暂).{0,6}不(?:予)?考虑|(?:暂时|目前|暂).{0,6}不(?:再)?推进|不(?:太)?合适|未通过.{0,10}(?:筛选|面试|评估)|(?:岗位|职位).{0,10}(?:已招满|已经招满|已关闭|已经关闭|暂停招聘)|(?:祝您|祝你).{0,20}(?:找到|找到更|求职顺利)|(?:很遗憾|抱歉).{0,20}(?:无法|不能).{0,12}(?:录用|安排面试|继续推进)/.test(part);
-    });
-  }
-  const wantsResume = text => !/不用|不必|不需要|不要|别发|无需|已(?:经)?收到|收到了|不方便|暂不|不用再/.test(text) && /(?:请|麻烦|方便|能|可以|能否|能不能).{0,12}(?:发|给|传|提供).{0,12}简历|(?:发|传|给).{0,8}(?:一份|一下|份|个|下).{0,8}简历|简历.{0,12}(?:发我|发来|发一下|给我|方便发)|resume\s*please/i.test(text);
   function decide(a, config) { return a.score >= config.threshold ? 'eligible' : 'rejected'; }
   function allowed(state, c, now) {
     if (!state.task || state.task.status !== 'running') return false;
@@ -578,10 +567,10 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     if (c.scheduleEnabled && !w?.active) fail('当前不在配置的运行时段内');
     return { id: `${now}-${Math.random().toString(36).slice(2)}`, status: 'running', source,
       startedAt: now, endAt: w?.end ?? null, windowId: w?.id ?? null, contacts: 0,
-      nextScanAt: now, exhausted: false, visited: [], replies: {}, searchUrl: '', leaseToken: '' };
+      nextScanAt: now, exhausted: false, visited: [], searchUrl: '', leaseToken: '' };
   }
   function canSend(s, c, now, kind, entry) {
-    if (!allowed(s, c, now) || !c.autoSend) return false;
+    if (!['contact', 'openOnly'].includes(kind) || !allowed(s, c, now) || !c.autoSend) return false;
     if (kind === 'openOnly') return !!(c.openRejected && c.verifiedEmptyContact &&
       entry?.status === 'rejected' && !entry.handoff && !entry.openOnlyStatus &&
       !s.outbox.some(item => item.key === entry.key && ['contact', 'openOnly'].includes(item.kind)));
@@ -589,8 +578,6 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     if (kind === 'contact' && s.task.contacts >= c.maxContacts) return false;
     if (kind === 'contact' && (!entry || entry.status !== 'eligible' || entry.handoff ||
       s.outbox.some(item => item.key === entry.key && item.kind === 'contact' && ['sent', 'pending', 'uncertain', 'duplicate'].includes(item.status)))) return false;
-    if (kind !== 'contact' && (!entry || entry.status !== 'contacted' || entry.handoff)) return false;
-    if (kind === 'reply' && (s.task.replies[entry.key] || 0) >= c.maxReplies) return false;
     return true;
   }
   const emptyState = () => ({ task: null, lastSendAt: 0, blockedWindow: '', entries: {}, outbox: [], logs: [] });
@@ -623,11 +610,9 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     s.outbox.push(item); if (kind !== 'openOnly') s.lastSendAt = now;
     if (kind === 'contact') { s.task.contacts++; entry.status = 'uncertain'; }
     if (kind === 'openOnly') entry.openOnlyStatus = 'pending';
-    if (kind === 'reply') s.task.replies[entry.key] = (s.task.replies[entry.key] || 0) + 1;
-    if (kind === 'resume') entry.resumeStatus = 'uncertain';
     return item;
   }
-  function publicConfig(c) { const { apiKey, ...safe } = c; return safe; }
+  function publicConfig(c) { const { apiKey, ...safe } = fixedConfig(c); return safe; }
   function leaseWinner(claims, now) {
     return claims.filter(c => c && c.expires > now).sort((a, b) => a.claimedAt - b.claimedAt || a.owner.localeCompare(b.owner))[0]?.owner ?? null;
   }
@@ -652,15 +637,15 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     }
     return compacted;
   }
-  return { AI_NOTICE, PROJECT_INTRO, PROJECT_URL, aiMessage, anonymousMessage, greetingMessage, isAIOutgoing, receiptMatches, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, actionDelay, parseJSON, analysis, reply, pair,
-    sensitive, wantsResume, isRejection, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner, temporaryFailure, runtimeStats, compactHistory, employmentUrl };
+  return { AI_NOTICE, PROJECT_INTRO, PROJECT_URL, aiMessage, anonymousMessage, greetingMessage, sanitizeProfile, receiptMatches, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, actionDelay, parseJSON, analysis, pair,
+    sensitive, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner, temporaryFailure, runtimeStats, compactHistory, employmentUrl };
 });
 
 /* DOM only. No private BOSS API calls; selectors are versioned user configuration. */
 (function (root) {
   'use strict';
   const DEFAULT_PROFILE = {
-    version: 4, verifiedContact: false, verifiedReply: false, verifiedResume: false,
+    version: 4, verifiedContact: false,
     firstContactOpensEmptyChat: false,
     card: '.job-card-wrapper, .job-card-box', cardLink: 'a[href*="/job_detail/"]',
     nextPage: '.options-pages .next, .pagination-next', endMarker: '.job-list-empty',
@@ -674,9 +659,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     recruiterName: '.job-boss-info h2.name, .boss-info h2, .boss-info .name, .boss-info-box h2, .boss-name',
     company: '.sider-company .company-info a, .job-boss-info .boss-info-attr, .job-company-info .company-name, .job-banner .company-name, .boss-info .company-name, .boss-info .boss-title',
     contact: '.op-btn-chat, .btn-startchat', chatUrl: 'https://www.zhipin.com/web/geek/chat',
-    conversation: '[data-boss-id][data-job-id]', conversationRecruiterAttr: 'data-boss-id', conversationJobAttr: 'data-job-id',
-    conversationRow: '.friend-content', conversationName: '.name-box .name-text',
-    conversationCompany: '.name-box > span:nth-of-type(2)',
+    conversationRow: '.friend-content',
     chatIdentity: '[data-current-boss-id][data-current-job-id]', chatRecruiterAttr: 'data-current-boss-id', chatJobAttr: 'data-current-job-id',
     chatHeader: '.chat-conversation, .chat-info, .chat-header, .conversation-header',
     chatEmpty: '.chat-conversation .chat-no-data',
@@ -687,13 +670,11 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     messageIncoming: '.message-item.item-friend, .message-item.friend', messageOutgoing: '.message-item.item-myself, .message-item.myself',
     messageText: '.text', richMessage: 'img:not(.emoji), audio, video, .file-card',
     composer: '#chat-input', send: '.btn-send',
-    resumeOpen: '.btn-resume', resumeDialog: '.resume-dialog', resumeItem: '.resume-item',
-    resumeName: '.resume-name', resumeSend: '.btn-send', resumeReceipt: '.resume-card',
     blocked: '.geetest_panel, .captcha-box, .verify-wrap, .login-dialog'
   };
   class Adapter {
-    constructor(doc = document, profile = {}, knownJobs = [], options = {}) {
-      this.doc = doc; this.p = { ...DEFAULT_PROFILE, ...profile }; this.knownJobs = knownJobs;
+    constructor(doc = document, profile = {}) {
+      this.doc = doc; this.p = { ...DEFAULT_PROFILE, ...root.BossCore.sanitizeProfile(profile) };
       if (profile.contact === '.op-btn-chat') this.p.contact = DEFAULT_PROFILE.contact;
       // Migrate only shipped defaults; preserve deliberate custom selectors.
       const legacy = { chatHeader: '.chat-info, .chat-header, .conversation-header', messages: '[data-message-id]',
@@ -983,7 +964,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     }
     diagnostic() {
       const counts = {};
-      for (const key of ['cardLink', 'detail', 'salary', 'recruiter', 'contact', 'conversation', 'conversationRow', 'chatIdentity', 'chatHeader', 'chatEmpty', 'chatRecruiterName', 'chatCompany', 'chatPosition', 'chatTitle', 'chatSalary', 'chatCity', 'messages', 'composer', 'send', 'resumeOpen', 'resumeDialog']) {
+      for (const key of ['cardLink', 'detail', 'salary', 'recruiter', 'contact', 'conversationRow', 'chatIdentity', 'chatHeader', 'chatEmpty', 'chatRecruiterName', 'chatCompany', 'chatPosition', 'chatTitle', 'chatSalary', 'chatCity', 'messages', 'composer', 'send']) {
         try { counts[key] = this.nodes(this.p[key]).length; } catch { counts[key] = '选择器错误'; }
       }
       const visibleMessages = this.nodes(this.p.messages), ignoredCards = visibleMessages.filter(n => this.isSystemNotice(n)).length;
@@ -991,7 +972,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       try { const x = this.inspectJob(); job = { jobIdFound: !!x.jobId, recruiterIdFound: !!x.recruiterId, descriptionLength: x.description.length }; } catch { /* not detail */ }
       try {
         const actual = this.identity(); chatIdentity = actual;
-        identity = actual.identityType === 'visible-fields' ? '岗位名称可读取；发送时仅匹配岗位名称，不核对薪资和城市（页面未提供岗位 ID）' : '岗位 ID 可核对';
+        identity = actual.identityType === 'visible-fields' ? '岗位名称可读取（仅诊断，不用于发送目标比对）' : '岗位 ID 可读取（仅诊断）';
       } catch (e) { identity = e.message; }
       const chat = this.nodes(this.p.chatHeader).map(scope => ({
         container: scope.className || scope.tagName || '',
@@ -1103,7 +1084,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       const original = safe('basicDiagnostic', () => this.diagnostic(), { unavailable: true });
       const basic = { counts: original.counts || {}, messageSummary: original.messageSummary || null,
         job: original.job || null, unavailable: !!original.unavailable,
-        identityStatus: original.identity === '岗位 ID 可核对' ? 'job-id-readable' : /岗位名称可读取/.test(original.identity || '') ? 'job-title-readable' :
+        identityStatus: original.identity === '岗位 ID 可读取（仅诊断）' ? 'job-id-readable' : /岗位名称可读取/.test(original.identity || '') ? 'job-title-readable' :
           /尚未选中/.test(original.identity || '') ? 'no-selected-conversation' : 'missing-or-ambiguous' };
       return { page: this.doc.location.pathname,
         health: safe('health', () => this.healthIssue()?.kind || 'normal', 'unknown'),
@@ -1197,7 +1178,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
 
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.43';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.45';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -1597,8 +1578,10 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       if (!closed) throw new Error('脚本工作页关闭未确认，已暂停以防页面累积；请手动关闭工作页后重试');
     }
   }
+  // Also consumes persisted receipts from old versions; never dispatches legacy actions.
   function settle(s, item, data) {
     const live = s.outbox.find(x => x.id === item.id), entry = s.entries[item.key];
+    if (['contact', 'openOnly'].includes(item.kind)) s.task.nextScanAt = Math.max(s.task.nextScanAt || 0, Date.now() + C.actionDelay(config(), 'nextJobSeconds'));
     if (item.kind === 'openOnly') {
       live.status = data.opened ? 'opened' : data.existing ? 'skipped' : 'uncertain';
       entry.openOnlyStatus = live.status; entry.handoff = true;
@@ -1621,7 +1604,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
   }
   async function dispatchEntry(entry, kind, payload, taskId) {
     if (!['contact', 'openOnly'].includes(kind)) throw new Error('自动回复和附件功能已移除，请手动处理');
-    if (kind === 'contact' || kind === 'reply') payload = { ...payload, text: (kind === 'contact' ? C.greetingMessage : C.anonymousMessage)(payload.text, config().resume, entry.job) };
+    if (kind === 'contact') payload = { ...payload, text: C.greetingMessage(payload.text, config().resume, entry.job) };
     const c = config(), s = state();
     if (!still(taskId) || !C.canSend(s, c, Date.now(), kind, s.entries[entry.key])) return false;
     const item = C.reserve(s, c, Date.now(), kind, s.entries[entry.key], payload);
@@ -1636,13 +1619,13 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     const key = context.key || (job.recruiterId ? C.pair(job) : 'unidentified:' + job.jobId);
     const prior = s.entries[key], pending = s.outbox.find(x => x.key === key && x.taskId === taskId && x.status === 'pending');
     const sendInfo = pending && get('sendStage.' + pending.id);
-    const readOnly = ['职位读取', '聊天处理'].includes(context.kind);
+    const readOnly = context.kind === '职位读取';
     const safeBeforeSend = pending && ['reserved', 'prepared'].includes(sendInfo?.stage || pending.stage) &&
       !(sendInfo?.commandId && get('consumed.' + sendInfo.commandId));
     const attempt = prior?.retry?.taskId === taskId ? prior.retry.attempt : 0;
     if (C.temporaryFailure(error) && (readOnly || safeBeforeSend) && attempt < 2) {
       const entry = prior || { key, job, status: 'review', taskId, createdAt: Date.now() };
-      entry.retry = { action: readOnly ? context.kind === '职位读取' ? 'inspect' : 'history' : 'send',
+      entry.retry = { action: readOnly ? 'inspect' : 'send',
         attempt: attempt + 1, at: Date.now() + 60000 * (attempt + 1), taskId, sendId: pending?.id, reason: error.message };
       entry.handoff = false; delete entry.hidden;
       entry.note = `临时故障：${error.message}；第${attempt + 1}/2次延后重试，约${60 * (attempt + 1)}秒后执行`;
@@ -1770,6 +1753,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     try {
       if (s.task.leaseToken !== owner) { await recoverExecution(taskId); return; }
       let retiredChat = false;
+      for (const key of ['replies', 'nextChatAt', 'chatCursor']) if (Object.hasOwn(s.task, key)) { delete s.task[key]; retiredChat = true; }
       for (const entry of Object.values(s.entries)) {
         if (entry.pendingReply) { delete entry.pendingReply; retiredChat = true; }
         const queued = entry.retry?.sendId && s.outbox.find(x => x.id === entry.retry.sendId);
@@ -1830,14 +1814,16 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       if (sendRetry && c.autoSend && Date.now() >= (s.lastSendAt || 0) + c.sendIntervalSeconds * 1000) {
         const item = s.outbox.find(x => x.id === sendRetry.retry.sendId && x.status === 'pending' && x.taskId === taskId);
         if (!item) { delete sendRetry.retry; persist(s); return; }
-        actionContext = { key: sendRetry.key, job: sendRetry.job, kind: item.kind === 'contact' ? '首聊发送' : item.kind === 'reply' ? '回复发送' : item.kind === 'resume' ? '附件发送' : '仅打开沟通' };
+        actionContext = { key: sendRetry.key, job: sendRetry.job, kind: item.kind === 'contact' ? '首聊发送' : '仅打开沟通' };
         const data = await command(item.kind, { job: sendRetry.job, retryApproved: !!sendRetry.retryApproved, ...item.payload }, taskId, item.id);
         if (still(taskId)) { const fresh = state(); delete fresh.entries[item.key].retry; settle(fresh, item, data); persist(fresh); }
         return;
       }
       // Process one outbound action at a time; all actions share the persisted spacing gate.
-      const eligible = Object.values(s.entries).find(e => e.status === 'eligible' && e.taskId === taskId && !e.handoff);
-      if (eligible && !C.sensitive(eligible.analysis.greeting) && C.canSend(s, c, Date.now(), 'contact', eligible)) {
+      const eligible = Object.values(s.entries).find(e => e.status === 'eligible' && e.taskId === taskId &&
+        typeof e.analysis?.greeting === 'string' && e.analysis.greeting.trim() && !C.sensitive(e.analysis.greeting) &&
+        C.canSend(s, c, Date.now(), 'contact', e));
+      if (eligible) {
         actionContext = { key: eligible.key, job: eligible.job, kind: '首聊发送' };
         await dispatchEntry(eligible, 'contact', { text: eligible.analysis.greeting }, taskId); return;
       }
@@ -1988,13 +1974,14 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     workerBusy = true;
     try {
       if (!['inspect', 'contact', 'openOnly'].includes(cmd.type)) throw new Error('自动回复、私信巡检和附件功能已移除');
-      const sending = ['contact', 'reply', 'resume', 'openOnly'].includes(cmd.type), c = workerGuard(cmd, sending);
+      const sending = ['contact', 'openOnly'].includes(cmd.type), c = workerGuard(cmd, sending);
       if (cmd.healthCheck) { delete cmd.healthCheck; put('command', cmd); }
-      const adapter = new Adapter(document, c.profile, Object.values(state().entries).map(entry => entry.job)), job = cmd.args.job;
+      const adapter = new Adapter(document, c.profile), job = cmd.args.job;
       // Persist BEFORE any side effect. After reload, never repeat an uncertain click.
       if (get('consumed.' + cmd.id)) {
         workerFinish(cmd, { confirmed: false, reason: '发送操作已执行过但确认中断，请人工核对' }); return;
       }
+      if (['waitingFill', 'waitingSend'].includes(cmd.phase)) throw new Error('等待期间工作页已重载，已取消本次动作，请人工核对；不会重新点击沟通或发送');
       if (cmd.type === 'openOnly') {
         if (!c.openRejected || !c.verifiedEmptyContact) throw new Error('尚未确认立即沟通不会自动发送平台招呼，跳过');
         if (adapter.jobId(location.href) !== job.jobId) { navigateWorker(cmd, job.url); return; }
@@ -2116,17 +2103,17 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       <label><input type="checkbox" name="switchCategoryOnExhausted"> 当前类别遍历完后切换下一个岗位类别</label>
       <p class="muted">自动读取页面左上角及“更多”中的类别，按页面顺序点选轮换，无需输入名称；末尾轮换回第一个。顶部和折叠菜单中的同名副本合并，优先点击可见入口。不清空已读和发送记录、不重置额度，不点击新增或编辑求职期望。切换未确认时刷新续跑；仍按所选城市和实习/全职类型搜索。</p>
       <div class="row"><div><label>开始时间</label><input type="time" name="startTime"></div><div><label>停止时间（可跨午夜）</label><input type="time" name="stopTime"></div></div>
-      <div class="row"><div><label>每次任务最多首聊次数</label><input type="number" name="maxContacts" min="1" max="500"></div><div><label>所有发送动作最小间隔 / 秒</label><input type="number" name="sendIntervalSeconds" min="1"></div></div>
-      <div class="row"><div><label>打开职位前等待 / 秒</label><input type="number" name="beforeOpenSeconds" min="0" max="3600"></div><div><label>核对后多久填入招呼 / 秒</label><input type="number" name="beforeFillSeconds" min="0" max="3600"></div></div>
+      <div class="row"><div><label>每次任务最多首聊次数</label><input type="number" name="maxContacts" min="1" max="500"></div><div><label>招呼发送最小间隔 / 秒</label><input type="number" name="sendIntervalSeconds" min="1"></div></div>
+      <div class="row"><div><label>打开职位前等待 / 秒</label><input type="number" name="beforeOpenSeconds" min="0" max="3600"></div><div><label>填入招呼前等待 / 秒</label><input type="number" name="beforeFillSeconds" min="0" max="3600"></div></div>
       <div class="row"><div><label>填入后多久点击发送 / 秒</label><input type="number" name="beforeSendSeconds" min="0" max="3600"></div><div><label>多久处理下一个岗位 / 秒</label><input type="number" name="nextJobSeconds" min="0" max="3600"></div></div>
-      <p class="muted">上述四项为基础等待，每次分别加上下面范围内独立抽取的随机秒数；默认基础等待0秒。共用随机范围也用于刷新与聊天扫描。填入及发送等待仅用于首次文字招呼；所有发送仍受最小发送间隔约束。等待中可立即停止，到停止时间取消；等待后重新检查消息记录和草稿。</p>
+      <p class="muted">上述四项为基础等待，每次分别加上下面范围内独立抽取的随机秒数；默认基础等待0秒。共用随机范围也用于刷新与岗位扫描。填入及发送等待仅用于首次文字招呼；所有发送仍受最小发送间隔约束。等待中可立即停止，到停止时间取消；等待后重新检查消息记录和草稿。</p>
       <div class="row"><div><label>共用随机延迟最小 / 秒</label><input type="number" name="refreshMinSeconds" min="1" max="3600"></div><div><label>共用随机延迟最大 / 秒</label><input type="number" name="refreshMaxSeconds" min="1" max="3600"></div></div>
       <label>AI 请求等待上限 / 秒</label><input type="number" name="aiTimeoutSeconds" min="30" max="600"><p class="muted">默认180秒，可设30–600秒；用于等待完整AI响应，与刷新及发送间隔独立。服务商端的超时不一定随此设置延长。超时按最多3次AI尝试处理，连续失败才暂停；不重试发送点击。</p>
       <p class="muted">默认每轮独立随机等待 10–60 秒；读取完一个职位后刷新搜索页。翻页和滚动也使用随机等待，不重复分析已读职位。AI/加载耗时另计，不保证精确刷新时刻。</p>
       <label>AI 匹配阈值 / 100</label><input type="number" name="threshold" min="0" max="100"></details>
-      <p class="muted">BOSS按所选实习/全职类型筛选，职位符合城市条件且分数达到阈值即可进入发送队列。AI 的“适合/不确定”标记和疑点仅供参考；实际发送仍需授权、对象核对，并遵守间隔和额度。</p>
-      <details><summary>AI 提示词与附件</summary><p class="muted">评分标准：${C.SCORING.map(x => x.label + ' ' + x.max + '分').join('；')}。AI 给各项分数，代码加总。“优先/加分项”仅影响最后10分，不重复扣分；岗位没有加分条款时此项按10分中性计入。</p><label>筛选要求</label><textarea name="screeningPrompt"></textarea><label>招呼语要求</label><textarea name="greetingPrompt"></textarea><p class="muted">首条招呼包含插件项目介绍与 GitHub 地址；消息末尾不再追加独立的 AI 发送提醒。</p><p class="muted">仅发送首次文字招呼；后续私信、简历、卡片与附件均由人工处理。</p><input name="resumeName" type="hidden"></details>
-      <details><summary>页面诊断与高级适配</summary><p class="muted">开启聊天窗口核对时，有岗位 ID 则核对 ID；没有 ID 时仅核对岗位名称，不核对薪资、城市、招聘者或公司。关闭核对时跳过这项比对，但仍要求聊天窗口和输入框可用。“竞争者PK情况”系统卡片不计入聊天消息；其它已有消息仍阻止追加首条招呼。附件选择仍需校准，不要凭猜测开启 verified 标记。</p><button type="button" id="diagnostic">只读诊断当前页面</button><button type="button" id="defaultProfile">载入默认适配模板</button><pre id="diagnosticOutput"></pre><label>页面适配 JSON（仅 CSS 选择器和流程验证标记）</label><textarea name="profile" rows="8" spellcheck="false"></textarea></details>
+      <p class="muted">BOSS按所选实习/全职类型筛选，职位符合城市条件且分数达到阈值即可进入发送队列。AI 的“适合/不确定”标记和疑点仅供参考；实际发送仍需授权、窗口和输入框可用，并遵守去重、间隔和额度。</p>
+      <details><summary>AI 提示词</summary><p class="muted">评分标准：${C.SCORING.map(x => x.label + ' ' + x.max + '分').join('；')}。AI 给各项分数，代码加总。“优先/加分项”仅影响最后10分，不重复扣分；岗位没有加分条款时此项按10分中性计入。</p><label>筛选要求</label><textarea name="screeningPrompt"></textarea><label>招呼语要求</label><textarea name="greetingPrompt"></textarea><p class="muted">首条招呼包含插件项目介绍与 GitHub 地址；消息末尾不再追加独立的 AI 发送提醒。</p></details>
+      <details><summary>页面诊断与高级适配</summary><p class="muted">用于排查页面元素未匹配；正常使用无需修改。只读诊断使用当前表单，不调用AI或发送消息；默认模板需保存后生效。高级适配仅调整读取位置，不恢复已移除的自动回复、附件发送或聊天目标比对。</p><button type="button" id="diagnostic">只读诊断当前页面</button><button type="button" id="defaultProfile">载入默认适配模板</button><pre id="diagnosticOutput"></pre><label>页面适配 JSON（仅 CSS 选择器和流程验证标记）</label><textarea name="profile" rows="8" spellcheck="false"></textarea></details>
       <label><input type="checkbox" name="debugMode"> 调试模式：显示一键页面诊断工具</label><p class="muted">保存后在左下角显示“获取聊天页面信息”，可复制或下载脱敏结构报告。建议先停止任务，再手动打开目标会话采集；调试开关不改变自动发送权限，也不跳过历史去重或发送回执检查。</p>
       <label class="warn"><input type="checkbox" name="autoSend"> 允许 AI 自动发送（默认关闭）</label>
       <label><input type="checkbox" name="openRejected"> 不匹配岗位也仅打开沟通，不填写或发送 AI 消息</label>
@@ -2189,7 +2176,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     q('stop').onclick = e => { importEpoch++; originalStop(e); };
     form.elements.autoSend.onchange = () => {
       if (!form.elements.autoSend.checked) { disableAutoSend(); notify('已禁止 AI 自动发送；若正在发送，任务将暂停供你核实。其余表单修改尚未保存。'); }
-      else notify('允许发送的勾选尚未保存；请先停止任务，再保存配置。发送时仍会核对对象和页面结构。');
+      else notify('允许发送的勾选尚未保存；请先停止任务，再保存配置。发送时使用当前展开的会话，并检查输入框、消息记录和草稿。');
     };
     form.onsubmit = action(() => {
       if (state().task?.status === 'running' || busy || apiTesting) throw new Error('先停止任务并等待AI操作完成，再保存配置');
@@ -2240,8 +2227,8 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       const raw = JSON.parse(await f.text());
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('配置文件格式无效');
       // Credentials and send permissions are never imported from a shared file.
-      const c = { ...C.defaults(), ...raw, apiKey: '', autoSend: false,
-        profile: { ...(raw.profile || {}), verifiedContact: false, verifiedReply: false, verifiedResume: false, firstContactOpensEmptyChat: false } };
+      const c = C.fixedConfig({ ...raw, apiKey: '', autoSend: false,
+        profile: { ...(raw.profile || {}), verifiedContact: false, firstContactOpensEmptyChat: false } });
       C.validateConfig(c); load(c); notify('配置已载入表单；请重新输入 Key、校准页面并保存。当前运行配置未更改。');
     });
     GM_registerMenuCommand('打开 AI 求职配置', () => q('launch').click());
@@ -2253,7 +2240,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
   function debugReport(options = {}) {
     const c = config();
     if (!c.debugMode) throw new Error('请先在配置面板开启调试模式并保存');
-    const adapter = new Adapter(document, c.profile, []);
+    const adapter = new Adapter(document, c.profile);
     const s = state(), cmd = get('command');
     return { schemaVersion: 2, scriptVersion: VERSION, capturedAt: new Date().toISOString(),
       checks: { chatIdentityComparison: false, historyAndDuplicateChecks: true, receiptChecks: true },
@@ -2300,8 +2287,8 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     if (cmd?.taskId === s.task.id) {
       const labels = { inspect: '读取职位详情', contact: '首聊流程', openOnly: '仅打开沟通' };
       const elapsed = Math.max(0, Math.floor((Date.now() - cmd.createdAt) / 1000));
-      const phases = { new: '载入工作页', detail: '载入详情', opening: '打开目标会话', chatList: '查找会话', selected: '等待会话展开', chat: '读取聊天', waitingFill: '核对后等待填入', waitingSend: '填入后等待发送' };
-      return (cmd.healthCheck ? '页面异常自动复查中 · ' : '') + `当前动作：${labels[cmd.type] || '页面操作'} · ${phases[cmd.phase] || cmd.phase} · 已等待${elapsed}秒 / 上限90秒` +
+      const phases = { new: '载入工作页', detail: '载入详情', opening: '打开目标会话', chat: '读取聊天', waitingFill: '等待填入招呼', waitingSend: '填入后等待发送' };
+      return (cmd.healthCheck ? '页面异常自动复查中 · ' : '') + `当前动作：${labels[cmd.type] || '页面操作'} · ${phases[cmd.phase] || cmd.phase} · 已等待${elapsed}秒 / 上限${Math.ceil((cmd.timeoutMs || 90000) / 1000)}秒` +
         (get('workerRegistered.' + cmd.workerId) ? '' : ' · 等待后台工作页加载并注册脚本');
     }
     if (busy) return '当前动作：正在处理任务；若正在重试，请查看运行记录';

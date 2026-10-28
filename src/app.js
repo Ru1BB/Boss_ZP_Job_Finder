@@ -1,6 +1,6 @@
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.43';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.45';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -400,8 +400,10 @@
       if (!closed) throw new Error('脚本工作页关闭未确认，已暂停以防页面累积；请手动关闭工作页后重试');
     }
   }
+  // Also consumes persisted receipts from old versions; never dispatches legacy actions.
   function settle(s, item, data) {
     const live = s.outbox.find(x => x.id === item.id), entry = s.entries[item.key];
+    if (['contact', 'openOnly'].includes(item.kind)) s.task.nextScanAt = Math.max(s.task.nextScanAt || 0, Date.now() + C.actionDelay(config(), 'nextJobSeconds'));
     if (item.kind === 'openOnly') {
       live.status = data.opened ? 'opened' : data.existing ? 'skipped' : 'uncertain';
       entry.openOnlyStatus = live.status; entry.handoff = true;
@@ -424,7 +426,7 @@
   }
   async function dispatchEntry(entry, kind, payload, taskId) {
     if (!['contact', 'openOnly'].includes(kind)) throw new Error('自动回复和附件功能已移除，请手动处理');
-    if (kind === 'contact' || kind === 'reply') payload = { ...payload, text: (kind === 'contact' ? C.greetingMessage : C.anonymousMessage)(payload.text, config().resume, entry.job) };
+    if (kind === 'contact') payload = { ...payload, text: C.greetingMessage(payload.text, config().resume, entry.job) };
     const c = config(), s = state();
     if (!still(taskId) || !C.canSend(s, c, Date.now(), kind, s.entries[entry.key])) return false;
     const item = C.reserve(s, c, Date.now(), kind, s.entries[entry.key], payload);
@@ -439,13 +441,13 @@
     const key = context.key || (job.recruiterId ? C.pair(job) : 'unidentified:' + job.jobId);
     const prior = s.entries[key], pending = s.outbox.find(x => x.key === key && x.taskId === taskId && x.status === 'pending');
     const sendInfo = pending && get('sendStage.' + pending.id);
-    const readOnly = ['职位读取', '聊天处理'].includes(context.kind);
+    const readOnly = context.kind === '职位读取';
     const safeBeforeSend = pending && ['reserved', 'prepared'].includes(sendInfo?.stage || pending.stage) &&
       !(sendInfo?.commandId && get('consumed.' + sendInfo.commandId));
     const attempt = prior?.retry?.taskId === taskId ? prior.retry.attempt : 0;
     if (C.temporaryFailure(error) && (readOnly || safeBeforeSend) && attempt < 2) {
       const entry = prior || { key, job, status: 'review', taskId, createdAt: Date.now() };
-      entry.retry = { action: readOnly ? context.kind === '职位读取' ? 'inspect' : 'history' : 'send',
+      entry.retry = { action: readOnly ? 'inspect' : 'send',
         attempt: attempt + 1, at: Date.now() + 60000 * (attempt + 1), taskId, sendId: pending?.id, reason: error.message };
       entry.handoff = false; delete entry.hidden;
       entry.note = `临时故障：${error.message}；第${attempt + 1}/2次延后重试，约${60 * (attempt + 1)}秒后执行`;
@@ -573,6 +575,7 @@
     try {
       if (s.task.leaseToken !== owner) { await recoverExecution(taskId); return; }
       let retiredChat = false;
+      for (const key of ['replies', 'nextChatAt', 'chatCursor']) if (Object.hasOwn(s.task, key)) { delete s.task[key]; retiredChat = true; }
       for (const entry of Object.values(s.entries)) {
         if (entry.pendingReply) { delete entry.pendingReply; retiredChat = true; }
         const queued = entry.retry?.sendId && s.outbox.find(x => x.id === entry.retry.sendId);
@@ -633,14 +636,16 @@
       if (sendRetry && c.autoSend && Date.now() >= (s.lastSendAt || 0) + c.sendIntervalSeconds * 1000) {
         const item = s.outbox.find(x => x.id === sendRetry.retry.sendId && x.status === 'pending' && x.taskId === taskId);
         if (!item) { delete sendRetry.retry; persist(s); return; }
-        actionContext = { key: sendRetry.key, job: sendRetry.job, kind: item.kind === 'contact' ? '首聊发送' : item.kind === 'reply' ? '回复发送' : item.kind === 'resume' ? '附件发送' : '仅打开沟通' };
+        actionContext = { key: sendRetry.key, job: sendRetry.job, kind: item.kind === 'contact' ? '首聊发送' : '仅打开沟通' };
         const data = await command(item.kind, { job: sendRetry.job, retryApproved: !!sendRetry.retryApproved, ...item.payload }, taskId, item.id);
         if (still(taskId)) { const fresh = state(); delete fresh.entries[item.key].retry; settle(fresh, item, data); persist(fresh); }
         return;
       }
       // Process one outbound action at a time; all actions share the persisted spacing gate.
-      const eligible = Object.values(s.entries).find(e => e.status === 'eligible' && e.taskId === taskId && !e.handoff);
-      if (eligible && !C.sensitive(eligible.analysis.greeting) && C.canSend(s, c, Date.now(), 'contact', eligible)) {
+      const eligible = Object.values(s.entries).find(e => e.status === 'eligible' && e.taskId === taskId &&
+        typeof e.analysis?.greeting === 'string' && e.analysis.greeting.trim() && !C.sensitive(e.analysis.greeting) &&
+        C.canSend(s, c, Date.now(), 'contact', e));
+      if (eligible) {
         actionContext = { key: eligible.key, job: eligible.job, kind: '首聊发送' };
         await dispatchEntry(eligible, 'contact', { text: eligible.analysis.greeting }, taskId); return;
       }
@@ -791,13 +796,14 @@
     workerBusy = true;
     try {
       if (!['inspect', 'contact', 'openOnly'].includes(cmd.type)) throw new Error('自动回复、私信巡检和附件功能已移除');
-      const sending = ['contact', 'reply', 'resume', 'openOnly'].includes(cmd.type), c = workerGuard(cmd, sending);
+      const sending = ['contact', 'openOnly'].includes(cmd.type), c = workerGuard(cmd, sending);
       if (cmd.healthCheck) { delete cmd.healthCheck; put('command', cmd); }
-      const adapter = new Adapter(document, c.profile, Object.values(state().entries).map(entry => entry.job)), job = cmd.args.job;
+      const adapter = new Adapter(document, c.profile), job = cmd.args.job;
       // Persist BEFORE any side effect. After reload, never repeat an uncertain click.
       if (get('consumed.' + cmd.id)) {
         workerFinish(cmd, { confirmed: false, reason: '发送操作已执行过但确认中断，请人工核对' }); return;
       }
+      if (['waitingFill', 'waitingSend'].includes(cmd.phase)) throw new Error('等待期间工作页已重载，已取消本次动作，请人工核对；不会重新点击沟通或发送');
       if (cmd.type === 'openOnly') {
         if (!c.openRejected || !c.verifiedEmptyContact) throw new Error('尚未确认立即沟通不会自动发送平台招呼，跳过');
         if (adapter.jobId(location.href) !== job.jobId) { navigateWorker(cmd, job.url); return; }
@@ -919,17 +925,17 @@
       <label><input type="checkbox" name="switchCategoryOnExhausted"> 当前类别遍历完后切换下一个岗位类别</label>
       <p class="muted">自动读取页面左上角及“更多”中的类别，按页面顺序点选轮换，无需输入名称；末尾轮换回第一个。顶部和折叠菜单中的同名副本合并，优先点击可见入口。不清空已读和发送记录、不重置额度，不点击新增或编辑求职期望。切换未确认时刷新续跑；仍按所选城市和实习/全职类型搜索。</p>
       <div class="row"><div><label>开始时间</label><input type="time" name="startTime"></div><div><label>停止时间（可跨午夜）</label><input type="time" name="stopTime"></div></div>
-      <div class="row"><div><label>每次任务最多首聊次数</label><input type="number" name="maxContacts" min="1" max="500"></div><div><label>所有发送动作最小间隔 / 秒</label><input type="number" name="sendIntervalSeconds" min="1"></div></div>
-      <div class="row"><div><label>打开职位前等待 / 秒</label><input type="number" name="beforeOpenSeconds" min="0" max="3600"></div><div><label>核对后多久填入招呼 / 秒</label><input type="number" name="beforeFillSeconds" min="0" max="3600"></div></div>
+      <div class="row"><div><label>每次任务最多首聊次数</label><input type="number" name="maxContacts" min="1" max="500"></div><div><label>招呼发送最小间隔 / 秒</label><input type="number" name="sendIntervalSeconds" min="1"></div></div>
+      <div class="row"><div><label>打开职位前等待 / 秒</label><input type="number" name="beforeOpenSeconds" min="0" max="3600"></div><div><label>填入招呼前等待 / 秒</label><input type="number" name="beforeFillSeconds" min="0" max="3600"></div></div>
       <div class="row"><div><label>填入后多久点击发送 / 秒</label><input type="number" name="beforeSendSeconds" min="0" max="3600"></div><div><label>多久处理下一个岗位 / 秒</label><input type="number" name="nextJobSeconds" min="0" max="3600"></div></div>
-      <p class="muted">上述四项为基础等待，每次分别加上下面范围内独立抽取的随机秒数；默认基础等待0秒。共用随机范围也用于刷新与聊天扫描。填入及发送等待仅用于首次文字招呼；所有发送仍受最小发送间隔约束。等待中可立即停止，到停止时间取消；等待后重新检查消息记录和草稿。</p>
+      <p class="muted">上述四项为基础等待，每次分别加上下面范围内独立抽取的随机秒数；默认基础等待0秒。共用随机范围也用于刷新与岗位扫描。填入及发送等待仅用于首次文字招呼；所有发送仍受最小发送间隔约束。等待中可立即停止，到停止时间取消；等待后重新检查消息记录和草稿。</p>
       <div class="row"><div><label>共用随机延迟最小 / 秒</label><input type="number" name="refreshMinSeconds" min="1" max="3600"></div><div><label>共用随机延迟最大 / 秒</label><input type="number" name="refreshMaxSeconds" min="1" max="3600"></div></div>
       <label>AI 请求等待上限 / 秒</label><input type="number" name="aiTimeoutSeconds" min="30" max="600"><p class="muted">默认180秒，可设30–600秒；用于等待完整AI响应，与刷新及发送间隔独立。服务商端的超时不一定随此设置延长。超时按最多3次AI尝试处理，连续失败才暂停；不重试发送点击。</p>
       <p class="muted">默认每轮独立随机等待 10–60 秒；读取完一个职位后刷新搜索页。翻页和滚动也使用随机等待，不重复分析已读职位。AI/加载耗时另计，不保证精确刷新时刻。</p>
       <label>AI 匹配阈值 / 100</label><input type="number" name="threshold" min="0" max="100"></details>
-      <p class="muted">BOSS按所选实习/全职类型筛选，职位符合城市条件且分数达到阈值即可进入发送队列。AI 的“适合/不确定”标记和疑点仅供参考；实际发送仍需授权、对象核对，并遵守间隔和额度。</p>
-      <details><summary>AI 提示词与附件</summary><p class="muted">评分标准：${C.SCORING.map(x => x.label + ' ' + x.max + '分').join('；')}。AI 给各项分数，代码加总。“优先/加分项”仅影响最后10分，不重复扣分；岗位没有加分条款时此项按10分中性计入。</p><label>筛选要求</label><textarea name="screeningPrompt"></textarea><label>招呼语要求</label><textarea name="greetingPrompt"></textarea><p class="muted">首条招呼包含插件项目介绍与 GitHub 地址；消息末尾不再追加独立的 AI 发送提醒。</p><p class="muted">仅发送首次文字招呼；后续私信、简历、卡片与附件均由人工处理。</p><input name="resumeName" type="hidden"></details>
-      <details><summary>页面诊断与高级适配</summary><p class="muted">开启聊天窗口核对时，有岗位 ID 则核对 ID；没有 ID 时仅核对岗位名称，不核对薪资、城市、招聘者或公司。关闭核对时跳过这项比对，但仍要求聊天窗口和输入框可用。“竞争者PK情况”系统卡片不计入聊天消息；其它已有消息仍阻止追加首条招呼。附件选择仍需校准，不要凭猜测开启 verified 标记。</p><button type="button" id="diagnostic">只读诊断当前页面</button><button type="button" id="defaultProfile">载入默认适配模板</button><pre id="diagnosticOutput"></pre><label>页面适配 JSON（仅 CSS 选择器和流程验证标记）</label><textarea name="profile" rows="8" spellcheck="false"></textarea></details>
+      <p class="muted">BOSS按所选实习/全职类型筛选，职位符合城市条件且分数达到阈值即可进入发送队列。AI 的“适合/不确定”标记和疑点仅供参考；实际发送仍需授权、窗口和输入框可用，并遵守去重、间隔和额度。</p>
+      <details><summary>AI 提示词</summary><p class="muted">评分标准：${C.SCORING.map(x => x.label + ' ' + x.max + '分').join('；')}。AI 给各项分数，代码加总。“优先/加分项”仅影响最后10分，不重复扣分；岗位没有加分条款时此项按10分中性计入。</p><label>筛选要求</label><textarea name="screeningPrompt"></textarea><label>招呼语要求</label><textarea name="greetingPrompt"></textarea><p class="muted">首条招呼包含插件项目介绍与 GitHub 地址；消息末尾不再追加独立的 AI 发送提醒。</p></details>
+      <details><summary>页面诊断与高级适配</summary><p class="muted">用于排查页面元素未匹配；正常使用无需修改。只读诊断使用当前表单，不调用AI或发送消息；默认模板需保存后生效。高级适配仅调整读取位置，不恢复已移除的自动回复、附件发送或聊天目标比对。</p><button type="button" id="diagnostic">只读诊断当前页面</button><button type="button" id="defaultProfile">载入默认适配模板</button><pre id="diagnosticOutput"></pre><label>页面适配 JSON（仅 CSS 选择器和流程验证标记）</label><textarea name="profile" rows="8" spellcheck="false"></textarea></details>
       <label><input type="checkbox" name="debugMode"> 调试模式：显示一键页面诊断工具</label><p class="muted">保存后在左下角显示“获取聊天页面信息”，可复制或下载脱敏结构报告。建议先停止任务，再手动打开目标会话采集；调试开关不改变自动发送权限，也不跳过历史去重或发送回执检查。</p>
       <label class="warn"><input type="checkbox" name="autoSend"> 允许 AI 自动发送（默认关闭）</label>
       <label><input type="checkbox" name="openRejected"> 不匹配岗位也仅打开沟通，不填写或发送 AI 消息</label>
@@ -992,7 +998,7 @@
     q('stop').onclick = e => { importEpoch++; originalStop(e); };
     form.elements.autoSend.onchange = () => {
       if (!form.elements.autoSend.checked) { disableAutoSend(); notify('已禁止 AI 自动发送；若正在发送，任务将暂停供你核实。其余表单修改尚未保存。'); }
-      else notify('允许发送的勾选尚未保存；请先停止任务，再保存配置。发送时仍会核对对象和页面结构。');
+      else notify('允许发送的勾选尚未保存；请先停止任务，再保存配置。发送时使用当前展开的会话，并检查输入框、消息记录和草稿。');
     };
     form.onsubmit = action(() => {
       if (state().task?.status === 'running' || busy || apiTesting) throw new Error('先停止任务并等待AI操作完成，再保存配置');
@@ -1043,8 +1049,8 @@
       const raw = JSON.parse(await f.text());
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('配置文件格式无效');
       // Credentials and send permissions are never imported from a shared file.
-      const c = { ...C.defaults(), ...raw, apiKey: '', autoSend: false,
-        profile: { ...(raw.profile || {}), verifiedContact: false, verifiedReply: false, verifiedResume: false, firstContactOpensEmptyChat: false } };
+      const c = C.fixedConfig({ ...raw, apiKey: '', autoSend: false,
+        profile: { ...(raw.profile || {}), verifiedContact: false, firstContactOpensEmptyChat: false } });
       C.validateConfig(c); load(c); notify('配置已载入表单；请重新输入 Key、校准页面并保存。当前运行配置未更改。');
     });
     GM_registerMenuCommand('打开 AI 求职配置', () => q('launch').click());
@@ -1056,7 +1062,7 @@
   function debugReport(options = {}) {
     const c = config();
     if (!c.debugMode) throw new Error('请先在配置面板开启调试模式并保存');
-    const adapter = new Adapter(document, c.profile, []);
+    const adapter = new Adapter(document, c.profile);
     const s = state(), cmd = get('command');
     return { schemaVersion: 2, scriptVersion: VERSION, capturedAt: new Date().toISOString(),
       checks: { chatIdentityComparison: false, historyAndDuplicateChecks: true, receiptChecks: true },
@@ -1103,8 +1109,8 @@
     if (cmd?.taskId === s.task.id) {
       const labels = { inspect: '读取职位详情', contact: '首聊流程', openOnly: '仅打开沟通' };
       const elapsed = Math.max(0, Math.floor((Date.now() - cmd.createdAt) / 1000));
-      const phases = { new: '载入工作页', detail: '载入详情', opening: '打开目标会话', chatList: '查找会话', selected: '等待会话展开', chat: '读取聊天', waitingFill: '核对后等待填入', waitingSend: '填入后等待发送' };
-      return (cmd.healthCheck ? '页面异常自动复查中 · ' : '') + `当前动作：${labels[cmd.type] || '页面操作'} · ${phases[cmd.phase] || cmd.phase} · 已等待${elapsed}秒 / 上限90秒` +
+      const phases = { new: '载入工作页', detail: '载入详情', opening: '打开目标会话', chat: '读取聊天', waitingFill: '等待填入招呼', waitingSend: '填入后等待发送' };
+      return (cmd.healthCheck ? '页面异常自动复查中 · ' : '') + `当前动作：${labels[cmd.type] || '页面操作'} · ${phases[cmd.phase] || cmd.phase} · 已等待${elapsed}秒 / 上限${Math.ceil((cmd.timeoutMs || 90000) / 1000)}秒` +
         (get('workerRegistered.' + cmd.workerId) ? '' : ' · 等待后台工作页加载并注册脚本');
     }
     if (busy) return '当前动作：正在处理任务；若正在重试，请查看运行记录';

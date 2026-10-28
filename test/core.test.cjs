@@ -62,11 +62,6 @@ test('greetings append the new introduction and URL once without a trailing AI n
   assert.equal(legacy.split(C.PROJECT_URL).length - 1, 1);
   assert.equal(C.greetingMessage(legacy), legacy);
 });
-test('AI receipt keyword requires an outgoing text message', () => {
-  assert.equal(C.isAIOutgoing({ role: 'candidate', text: '与草稿不同 AI' }), true);
-  assert.equal(C.isAIOutgoing({ role: 'recruiter', text: 'AI' }), false);
-  assert.equal(C.isAIOutgoing({ role: 'candidate', text: '普通消息' }), false);
-});
 const setup = () => {
   const c = { ...C.defaults(), autoSend: true }, s = C.emptyState();
   s.task = C.createTask(c, now);
@@ -149,7 +144,6 @@ test('AI disclosure is appended once to greetings and replies, including old que
   assert.equal(C.aiMessage('您好\n' + C.AI_NOTICE + '\n' + C.AI_NOTICE), C.aiMessage('您好'));
   assert.equal(C.aiMessage(''), '');
   assert.equal(C.analysis({ score: 90, suitable: true, uncertain: false, reason: '符合', doubts: [], greeting: '您好' }).greeting.endsWith(C.AI_NOTICE), false);
-  assert.equal(C.reply({ action: 'reply', text: '我有项目经验', reason: '有依据', evidence: ['项目经验'] }).text.endsWith(C.AI_NOTICE), false);
 });
 test('known personal names are replaced at the final message boundary', () => {
   const result = C.anonymousMessage('您好赵女士，我是张小明，来自示例大学。', '姓名：张小明。\n学校：示例大学', { recruiterName: '赵女士' });
@@ -185,24 +179,6 @@ test('manual new task resets quota, persistent spacing and dedupe survive', () =
   assert.equal(s.task.contacts, 0); assert.equal(s.lastSendAt, now);
   assert.equal(s.entries[entry.key].status, 'uncertain');
   assert.equal(C.canSend(s, c, now + 1000, 'contact', entry), false);
-});
-test('all outbound types share spacing; quota does not stop established chat', () => {
-  const { c, s, entry } = setup(); c.maxContacts = 1;
-  C.reserve(s, c, now, 'contact', entry, {}); entry.status = 'contacted';
-  assert.equal(C.canSend(s, c, now + 180000, 'contact', entry), false);
-  assert.equal(C.canSend(s, c, now + 179999, 'reply', entry), false);
-  assert.equal(C.canSend(s, c, now + 180000, 'reply', entry), true);
-  C.reserve(s, c, now + 180000, 'reply', entry, {});
-  assert.equal(C.canSend(s, c, now + 180001, 'resume', entry), false);
-});
-test('unowned, handoff and exhausted-reply conversations cannot auto reply', () => {
-  const { c, s, entry } = setup();
-  assert.equal(C.canSend(s, c, now, 'reply', null), false);
-  assert.equal(C.canSend(s, c, now, 'reply', entry), false);
-  entry.status = 'contacted'; entry.handoff = true;
-  assert.equal(C.canSend(s, c, now, 'reply', entry), false);
-  entry.handoff = false; s.task.replies[entry.key] = 5;
-  assert.equal(C.canSend(s, c, now, 'reply', entry), false);
 });
 test('stopping cancels permission for every pending outbound type', () => {
   const { c, s, entry } = setup(); entry.status = 'contacted'; s.task.status = 'stopped';
@@ -322,18 +298,9 @@ test('clear activity removes pending items while retaining dedupe and spacing re
   assert.equal(s.lastSendAt, now); assert.equal(s.task.contacts, 7); assert.deepEqual(s.task.visited, ['old-job']);
   assert.equal(C.canSend(s, c, now + 1000, 'reply', s.entries[entry.key]), false);
 });
-test('reply schema requires evidence and rejects invented action names', () => {
-  assert.throws(() => C.reply('{"action":"reply","text":"你好","reason":"","evidence":[]}'));
-  assert.throws(() => C.reply('{"action":"send_file","text":"","reason":"","evidence":[]}'));
-  assert.equal(C.reply('{"action":"handoff","text":"","reason":"需要确认","evidence":[]}').action, 'handoff');
-});
 test('important incoming matters always transfer to human', () => {
   for (const text of ['明天面试可以吗', '期望薪资多少', '加一下微信', '什么时候到岗', '发验证码']) assert.equal(C.sensitive(text), true);
   assert.equal(C.sensitive('用过哪些前端框架'), false);
-});
-test('resume requests require affirmative intent and reject negation', () => {
-  for (const text of ['请发一份简历', '方便发一下你的简历吗', '简历发我一下', '发一下简历']) assert.equal(C.wantsResume(text), true, text);
-  for (const text of ['不用发简历', '不需要你的简历', '已经收到简历', '简历很不错', '暂不需要发简历']) assert.equal(C.wantsResume(text), false, text);
 });
 test('API address is normalized and must be HTTPS without embedded credentials', () => {
   assert.equal(C.endpoint('https://api.deepseek.com'), 'https://api.deepseek.com/chat/completions');
@@ -365,10 +332,6 @@ test('multi-tab lease elects one deterministic winner and expires stale tabs', (
 });
 
 
-test('explicit recruiter rejections are recognized without matching quoted keywords or neutral questions', () => {
-  for (const text of ['您的经验与我们当前项目的需求并不完全吻合。祝您找到更好的机会！', '抱歉，目前不考虑', '不太合适', '这个岗位已招满', '很遗憾，无法安排面试', '您的简历不符合岗位要求']) assert.equal(C.isRejection(text), true, text);
-  for (const text of ['请介绍一下项目经验', '如果不合适你会怎么处理？', '我们不会拒绝没有实习经验的同学', '并非您的经验不符合要求', '不是不合适，还需要评估', '拒绝按钮是做什么的？']) assert.equal(C.isRejection(text), false, text);
-});
 
 
 test('all four action delays share the configured random range with an independent base', () => {
@@ -399,4 +362,34 @@ test('retired chat verification option is stripped from old imported configurati
     assert.equal(Object.hasOwn(c, 'verifyChatWindow'), false);
     assert.equal(Object.hasOwn(C.publicConfig(c), 'verifyChatWindow'), false);
   }
+});
+
+
+test('retired configuration and profile fields cannot block import or leak into exports', () => {
+  const c = C.fixedConfig({ maxReplies: 0, resumeName: 42, verifyChatWindow: true,
+    profile: { verifiedReply: 'invalid', verifiedResume: true, resumeOpen: 123, resumeReceipt: '.old', composer: '#custom-input' } });
+  assert.doesNotThrow(() => C.validateConfig(c));
+  const result = C.publicConfig(c);
+  for (const key of ['maxReplies', 'resumeName', 'verifyChatWindow']) assert.equal(Object.hasOwn(result, key), false);
+  assert.deepEqual(result.profile, { composer: '#custom-input' });
+  assert.equal(C.defaults().maxReplies, undefined); assert.equal(C.defaults().resumeName, undefined);
+});
+
+test('core reservations reject removed and unknown actions without consuming quotas', () => {
+  const { c, s, entry } = setup();
+  for (const kind of ['reply', 'resume', 'history', 'unknown']) {
+    assert.equal(C.canSend(s, c, now, kind, entry), false);
+    assert.throws(() => C.reserve(s, c, now, kind, entry, {}));
+  }
+  assert.equal(s.outbox.length, 0); assert.equal(s.task.contacts, 0);
+  assert.equal(C.canSend(s, c, now, 'contact', entry), true);
+  assert.equal(Object.hasOwn(s.task, 'replies'), false);
+});
+
+test('a later contact still observes the shared send interval after quota reset', () => {
+  const { c, s, entry } = setup(); C.reserve(s, c, now, 'contact', entry, {});
+  s.task = C.createTask(c, now + 1000);
+  const next = { key: 'different', status: 'eligible' };
+  assert.equal(C.canSend(s, c, now + 179999, 'contact', next), false);
+  assert.equal(C.canSend(s, c, now + 180000, 'contact', next), true);
 });

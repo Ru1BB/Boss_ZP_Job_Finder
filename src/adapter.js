@@ -2,7 +2,7 @@
 (function (root) {
   'use strict';
   const DEFAULT_PROFILE = {
-    version: 4, verifiedContact: false, verifiedReply: false, verifiedResume: false,
+    version: 4, verifiedContact: false,
     firstContactOpensEmptyChat: false,
     card: '.job-card-wrapper, .job-card-box', cardLink: 'a[href*="/job_detail/"]',
     nextPage: '.options-pages .next, .pagination-next', endMarker: '.job-list-empty',
@@ -16,9 +16,7 @@
     recruiterName: '.job-boss-info h2.name, .boss-info h2, .boss-info .name, .boss-info-box h2, .boss-name',
     company: '.sider-company .company-info a, .job-boss-info .boss-info-attr, .job-company-info .company-name, .job-banner .company-name, .boss-info .company-name, .boss-info .boss-title',
     contact: '.op-btn-chat, .btn-startchat', chatUrl: 'https://www.zhipin.com/web/geek/chat',
-    conversation: '[data-boss-id][data-job-id]', conversationRecruiterAttr: 'data-boss-id', conversationJobAttr: 'data-job-id',
-    conversationRow: '.friend-content', conversationName: '.name-box .name-text',
-    conversationCompany: '.name-box > span:nth-of-type(2)',
+    conversationRow: '.friend-content',
     chatIdentity: '[data-current-boss-id][data-current-job-id]', chatRecruiterAttr: 'data-current-boss-id', chatJobAttr: 'data-current-job-id',
     chatHeader: '.chat-conversation, .chat-info, .chat-header, .conversation-header',
     chatEmpty: '.chat-conversation .chat-no-data',
@@ -29,13 +27,11 @@
     messageIncoming: '.message-item.item-friend, .message-item.friend', messageOutgoing: '.message-item.item-myself, .message-item.myself',
     messageText: '.text', richMessage: 'img:not(.emoji), audio, video, .file-card',
     composer: '#chat-input', send: '.btn-send',
-    resumeOpen: '.btn-resume', resumeDialog: '.resume-dialog', resumeItem: '.resume-item',
-    resumeName: '.resume-name', resumeSend: '.btn-send', resumeReceipt: '.resume-card',
     blocked: '.geetest_panel, .captcha-box, .verify-wrap, .login-dialog'
   };
   class Adapter {
-    constructor(doc = document, profile = {}, knownJobs = [], options = {}) {
-      this.doc = doc; this.p = { ...DEFAULT_PROFILE, ...profile }; this.knownJobs = knownJobs;
+    constructor(doc = document, profile = {}) {
+      this.doc = doc; this.p = { ...DEFAULT_PROFILE, ...root.BossCore.sanitizeProfile(profile) };
       if (profile.contact === '.op-btn-chat') this.p.contact = DEFAULT_PROFILE.contact;
       // Migrate only shipped defaults; preserve deliberate custom selectors.
       const legacy = { chatHeader: '.chat-info, .chat-header, .conversation-header', messages: '[data-message-id]',
@@ -325,7 +321,7 @@
     }
     diagnostic() {
       const counts = {};
-      for (const key of ['cardLink', 'detail', 'salary', 'recruiter', 'contact', 'conversation', 'conversationRow', 'chatIdentity', 'chatHeader', 'chatEmpty', 'chatRecruiterName', 'chatCompany', 'chatPosition', 'chatTitle', 'chatSalary', 'chatCity', 'messages', 'composer', 'send', 'resumeOpen', 'resumeDialog']) {
+      for (const key of ['cardLink', 'detail', 'salary', 'recruiter', 'contact', 'conversationRow', 'chatIdentity', 'chatHeader', 'chatEmpty', 'chatRecruiterName', 'chatCompany', 'chatPosition', 'chatTitle', 'chatSalary', 'chatCity', 'messages', 'composer', 'send']) {
         try { counts[key] = this.nodes(this.p[key]).length; } catch { counts[key] = '选择器错误'; }
       }
       const visibleMessages = this.nodes(this.p.messages), ignoredCards = visibleMessages.filter(n => this.isSystemNotice(n)).length;
@@ -333,7 +329,7 @@
       try { const x = this.inspectJob(); job = { jobIdFound: !!x.jobId, recruiterIdFound: !!x.recruiterId, descriptionLength: x.description.length }; } catch { /* not detail */ }
       try {
         const actual = this.identity(); chatIdentity = actual;
-        identity = actual.identityType === 'visible-fields' ? '岗位名称可读取；发送时仅匹配岗位名称，不核对薪资和城市（页面未提供岗位 ID）' : '岗位 ID 可核对';
+        identity = actual.identityType === 'visible-fields' ? '岗位名称可读取（仅诊断，不用于发送目标比对）' : '岗位 ID 可读取（仅诊断）';
       } catch (e) { identity = e.message; }
       const chat = this.nodes(this.p.chatHeader).map(scope => ({
         container: scope.className || scope.tagName || '',
@@ -445,7 +441,7 @@
       const original = safe('basicDiagnostic', () => this.diagnostic(), { unavailable: true });
       const basic = { counts: original.counts || {}, messageSummary: original.messageSummary || null,
         job: original.job || null, unavailable: !!original.unavailable,
-        identityStatus: original.identity === '岗位 ID 可核对' ? 'job-id-readable' : /岗位名称可读取/.test(original.identity || '') ? 'job-title-readable' :
+        identityStatus: original.identity === '岗位 ID 可读取（仅诊断）' ? 'job-id-readable' : /岗位名称可读取/.test(original.identity || '') ? 'job-title-readable' :
           /尚未选中/.test(original.identity || '') ? 'no-selected-conversation' : 'missing-or-ambiguous' };
       return { page: this.doc.location.pathname,
         health: safe('health', () => this.healthIssue()?.kind || 'normal', 'unknown'),

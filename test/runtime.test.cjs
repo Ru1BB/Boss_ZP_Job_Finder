@@ -934,3 +934,27 @@ test('legacy conversations and queued replies never cause inbox polling or sendi
   assert.equal(r.state().entries[entry.key].pendingReply, undefined); assert.equal(r.state().entries[entry.key].retry, undefined);
   assert.equal(r.state().outbox[0].status, 'uncertain'); assert.equal(r.api.chatDecision, undefined);
 });
+
+
+test('status shows the actual command deadline including configured waits', () => {
+  const r = runtime(); r.api.start(); const taskId = r.state().task.id;
+  r.store.set('bossai.v1.command', { taskId, workerId: 'w', type: 'contact', phase: 'waitingSend', timeoutMs: 210000, createdAt: r.context.Date.now() });
+  assert.match(r.api.currentActivity(), /上限210秒/);
+});
+
+
+test('an unsendable first eligible entry cannot starve another eligible contact', async () => {
+  const r = runtime({ autoSend: true }); r.api.start(); const taskId = r.state().task.id;
+  const a = chatEntry(r, 'blocked-first'), b = chatEntry(r, 'ready-second');
+  for (const entry of [a, b]) { entry.status = 'eligible'; entry.taskId = taskId; entry.analysis = { greeting: '您好，我有项目经验' }; }
+  r.state().outbox.push({ id: 'prior', key: a.key, kind: 'contact', status: 'sent', taskId });
+  const sent = []; workerStub(r, cmd => { sent.push(cmd.args.job.jobId); return { ok: true, data: { confirmed: true } }; });
+  await r.api.pump(); assert.deepEqual(sent, ['ready-second']); assert.equal(r.state().entries[b.key].status, 'contacted');
+});
+
+test('next-job delay also starts after a contact finishes, not only before the send', () => {
+  const r = runtime({ nextJobSeconds: 30, refreshMinSeconds: 1, refreshMaxSeconds: 1 }); r.api.start();
+  const entry = chatEntry(r, 'settled'); const item = { id: 'new-send', key: entry.key, kind: 'contact', payload: {} };
+  r.state().outbox.push(item); r.api.settle(r.state(), item, { confirmed: true });
+  assert.equal(r.state().task.nextScanAt, r.context.Date.now() + 31000);
+});

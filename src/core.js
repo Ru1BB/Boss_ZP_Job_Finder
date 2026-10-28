@@ -28,12 +28,12 @@
     screeningPrompt: '综合考虑我的经历、技能和求职偏好，说明匹配理由与不确定性。',
     greetingPrompt: '用自然、简短的中文打招呼，突出真实匹配点，不编造经历，不承诺薪资或面试。',
     threshold: 80, maxContacts: 50, sendIntervalSeconds: 180, aiTimeoutSeconds: 180,
-    refreshMinSeconds: 10, refreshMaxSeconds: 60, maxReplies: 5,
+    refreshMinSeconds: 10, refreshMaxSeconds: 60,
     beforeOpenSeconds: 0, beforeFillSeconds: 0, beforeSendSeconds: 0, nextJobSeconds: 0,
     scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false,
     openRejected: true, verifiedEmptyContact: false,
     switchCategoryOnExhausted: true, debugMode: false,
-    resumeName: '', internshipOnly: true, requiredCity: '北京', profile: {}
+    internshipOnly: true, requiredCity: '北京', profile: {}
   });
   const fail = message => { throw new Error(message); };
   // Legacy marker: remove it from queued text and recognize old history; never append it.
@@ -66,13 +66,18 @@
     const normalize = text => String(text || '').replace(/\r\n?/g, '\n').replace(/[\u200b\ufeff]/g, '').replace(/\s+/g, ' ').trim();
     return message?.role === 'candidate' && !message.rich && !!normalize(expected) && normalize(message.text) === normalize(expected);
   }
-  function isAIOutgoing(message) {
-    return message?.role === 'candidate' && typeof message.text === 'string' && (message.text.includes('AI') || message.text.includes(PROJECT_INTRO));
+  function sanitizeProfile(profile) {
+    if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return profile;
+    const clean = { ...profile };
+    for (const key of ['verifiedReply', 'verifiedResume', 'resumeOpen', 'resumeDialog', 'resumeItem', 'resumeName',
+      'resumeSend', 'resumeReceipt', 'conversation', 'conversationRecruiterAttr', 'conversationJobAttr', 'conversationName', 'conversationCompany']) delete clean[key];
+    return clean;
   }
   function fixedConfig(raw = {}) {
     const provider = raw.provider ?? 'qwen';
     if (!Object.hasOwn(PROVIDERS, provider)) fail('不支持的供应商');
     const preset = PROVIDERS[provider], c = { ...defaults(), ...raw, ...preset, provider };
+    delete c.maxReplies; delete c.resumeName; c.profile = sanitizeProfile(c.profile);
     delete c.verifyChatWindow; // Retired option: chat identity is no longer compared.
     delete c.categoryLabels; // Retire the old manually entered category list.
     // Do not carry credentials from a previously configured different service to a new destination.
@@ -81,14 +86,14 @@
   }
   function validateConfig(c, requireAI = false) {
     if (!Object.hasOwn(PROVIDERS, c.provider)) fail('不支持的供应商');
-    for (const key of ['baseUrl', 'model', 'apiKey', 'resume', 'preferences', 'screeningPrompt', 'greetingPrompt', 'resumeName', 'requiredCity']) {
+    for (const key of ['baseUrl', 'model', 'apiKey', 'resume', 'preferences', 'screeningPrompt', 'greetingPrompt', 'requiredCity']) {
       if (typeof c[key] !== 'string') fail(`配置 ${key} 必须是文字`);
     }
     for (const key of ['autoSend', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact', 'switchCategoryOnExhausted', 'debugMode']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
     for (const [key, min, max] of [['threshold', 0, 100], ['maxContacts', 1, 500],
       ['beforeOpenSeconds', 0, 3600], ['beforeFillSeconds', 0, 3600], ['beforeSendSeconds', 0, 3600], ['nextJobSeconds', 0, 3600],
       ['sendIntervalSeconds', 1, 86400], ['refreshMinSeconds', 1, 3600],
-      ['refreshMaxSeconds', 1, 3600], ['maxReplies', 1, 100], ['aiTimeoutSeconds', 30, 600]]) {
+      ['refreshMaxSeconds', 1, 3600], ['aiTimeoutSeconds', 30, 600]]) {
       if (!Number.isInteger(c[key]) || c[key] < min || c[key] > max) fail(`配置 ${key} 必须是 ${min}–${max} 的整数`);
     }
     if (c.refreshMaxSeconds < c.refreshMinSeconds) fail('随机等待上限不能小于下限');
@@ -97,7 +102,7 @@
     if (requireAI && (!c.baseUrl || !c.model.trim() || !c.apiKey.trim() || !c.resume.trim())) fail('请填写 API 地址、模型、Key 和简历文字');
     if (!c.profile || typeof c.profile !== 'object' || Array.isArray(c.profile)) fail('页面适配配置必须是 JSON 对象');
     for (const [key, value] of Object.entries(c.profile)) {
-      if (['verifiedContact', 'verifiedReply', 'verifiedResume', 'firstContactOpensEmptyChat'].includes(key)) {
+      if (['verifiedContact', 'firstContactOpensEmptyChat'].includes(key)) {
         if (typeof value !== 'boolean') fail('页面流程验证标记必须为 true 或 false');
       } else if (key !== 'version' && typeof value !== 'string') fail('页面选择器和属性名必须为文字');
     }
@@ -148,7 +153,7 @@
   function parseJSON(s) {
     if (typeof s !== 'string' || s.length > 50000) fail('AI 返回内容无效');
     try { return JSON.parse(s.replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '')); }
-    catch { fail('AI 未返回有效 JSON，已暂停'); }
+    catch { fail('AI 未返回有效 JSON'); }
   }
   function analysis(raw) {
     const x = typeof raw === 'string' ? parseJSON(raw) : raw;
@@ -198,27 +203,11 @@
     if (history.some(m => m.role === 'candidate')) return 'manual-sent';
     return history.length ? 'incoming-or-unknown' : 'empty';
   }
-  function reply(raw) {
-    const x = typeof raw === 'string' ? parseJSON(raw) : raw;
-    if (!x || !['reply', 'resume', 'handoff'].includes(x.action) || typeof x.text !== 'string' ||
-      typeof x.reason !== 'string' || !Array.isArray(x.evidence) || !x.evidence.every(v => typeof v === 'string') ||
-      x.text.length > 1000 || (x.action === 'reply' && (!x.text.trim() || !x.evidence.length))) fail('AI 回复结果结构无效');
-    if (x.action === 'reply') x.text = aiMessage(x.text);
-    return x;
-  }
   function pair(job) {
     if (!job || !job.jobId || !job.recruiterId) fail('无法可靠识别岗位及招聘者');
     return JSON.stringify([String(job.recruiterId), String(job.jobId)]);
   }
   const sensitive = text => /面试|约面|几点|周[一二三四五六日天]|明天|后天|到岗|入职|薪资|工资|待遇|底薪|期望薪|报价|微信|手机号|电话|邮箱|身份证|银行卡|转账|付款|验证码|下载|安装|点击链接|加.{0,3}(微|v|V)/i.test(text);
-  function isRejection(text) {
-    // Match complete rejection phrases, not isolated words such as “拒绝”.
-    return String(text || '').split(/[。！？!?；;\n]+/).some(part => {
-      if (/如果|假如|万一|是否|并非|不是说|不是不|并不是|不代表|不意味着|不会拒绝|不拒绝|不予拒绝/.test(part)) return false;
-      return /(?:您的?|你的?)(?:背景|经验|经历|技能|条件|简历|专业|能力).{0,40}(?:不(?:太|完全)?(?:符合|匹配|吻合|适合)|尚不符合|未(?:能)?达到)|(?:您|你|同学).{0,12}(?:不太适合|不符合.{0,12}要求)|(?:岗位|职位|需求|要求).{0,20}(?:与您|与你|和您|和你).{0,15}不(?:太)?匹配|(?:暂时|目前|暂).{0,6}不(?:予)?考虑|(?:暂时|目前|暂).{0,6}不(?:再)?推进|不(?:太)?合适|未通过.{0,10}(?:筛选|面试|评估)|(?:岗位|职位).{0,10}(?:已招满|已经招满|已关闭|已经关闭|暂停招聘)|(?:祝您|祝你).{0,20}(?:找到|找到更|求职顺利)|(?:很遗憾|抱歉).{0,20}(?:无法|不能).{0,12}(?:录用|安排面试|继续推进)/.test(part);
-    });
-  }
-  const wantsResume = text => !/不用|不必|不需要|不要|别发|无需|已(?:经)?收到|收到了|不方便|暂不|不用再/.test(text) && /(?:请|麻烦|方便|能|可以|能否|能不能).{0,12}(?:发|给|传|提供).{0,12}简历|(?:发|传|给).{0,8}(?:一份|一下|份|个|下).{0,8}简历|简历.{0,12}(?:发我|发来|发一下|给我|方便发)|resume\s*please/i.test(text);
   function decide(a, config) { return a.score >= config.threshold ? 'eligible' : 'rejected'; }
   function allowed(state, c, now) {
     if (!state.task || state.task.status !== 'running') return false;
@@ -231,10 +220,10 @@
     if (c.scheduleEnabled && !w?.active) fail('当前不在配置的运行时段内');
     return { id: `${now}-${Math.random().toString(36).slice(2)}`, status: 'running', source,
       startedAt: now, endAt: w?.end ?? null, windowId: w?.id ?? null, contacts: 0,
-      nextScanAt: now, exhausted: false, visited: [], replies: {}, searchUrl: '', leaseToken: '' };
+      nextScanAt: now, exhausted: false, visited: [], searchUrl: '', leaseToken: '' };
   }
   function canSend(s, c, now, kind, entry) {
-    if (!allowed(s, c, now) || !c.autoSend) return false;
+    if (!['contact', 'openOnly'].includes(kind) || !allowed(s, c, now) || !c.autoSend) return false;
     if (kind === 'openOnly') return !!(c.openRejected && c.verifiedEmptyContact &&
       entry?.status === 'rejected' && !entry.handoff && !entry.openOnlyStatus &&
       !s.outbox.some(item => item.key === entry.key && ['contact', 'openOnly'].includes(item.kind)));
@@ -242,8 +231,6 @@
     if (kind === 'contact' && s.task.contacts >= c.maxContacts) return false;
     if (kind === 'contact' && (!entry || entry.status !== 'eligible' || entry.handoff ||
       s.outbox.some(item => item.key === entry.key && item.kind === 'contact' && ['sent', 'pending', 'uncertain', 'duplicate'].includes(item.status)))) return false;
-    if (kind !== 'contact' && (!entry || entry.status !== 'contacted' || entry.handoff)) return false;
-    if (kind === 'reply' && (s.task.replies[entry.key] || 0) >= c.maxReplies) return false;
     return true;
   }
   const emptyState = () => ({ task: null, lastSendAt: 0, blockedWindow: '', entries: {}, outbox: [], logs: [] });
@@ -276,11 +263,9 @@
     s.outbox.push(item); if (kind !== 'openOnly') s.lastSendAt = now;
     if (kind === 'contact') { s.task.contacts++; entry.status = 'uncertain'; }
     if (kind === 'openOnly') entry.openOnlyStatus = 'pending';
-    if (kind === 'reply') s.task.replies[entry.key] = (s.task.replies[entry.key] || 0) + 1;
-    if (kind === 'resume') entry.resumeStatus = 'uncertain';
     return item;
   }
-  function publicConfig(c) { const { apiKey, ...safe } = c; return safe; }
+  function publicConfig(c) { const { apiKey, ...safe } = fixedConfig(c); return safe; }
   function leaseWinner(claims, now) {
     return claims.filter(c => c && c.expires > now).sort((a, b) => a.claimedAt - b.claimedAt || a.owner.localeCompare(b.owner))[0]?.owner ?? null;
   }
@@ -305,6 +290,6 @@
     }
     return compacted;
   }
-  return { AI_NOTICE, PROJECT_INTRO, PROJECT_URL, aiMessage, anonymousMessage, greetingMessage, isAIOutgoing, receiptMatches, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, actionDelay, parseJSON, analysis, reply, pair,
-    sensitive, wantsResume, isRejection, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner, temporaryFailure, runtimeStats, compactHistory, employmentUrl };
+  return { AI_NOTICE, PROJECT_INTRO, PROJECT_URL, aiMessage, anonymousMessage, greetingMessage, sanitizeProfile, receiptMatches, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, actionDelay, parseJSON, analysis, pair,
+    sensitive, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner, temporaryFailure, runtimeStats, compactHistory, employmentUrl };
 });

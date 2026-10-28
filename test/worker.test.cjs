@@ -221,3 +221,13 @@ test('removed reply, history and attachment commands cannot inspect or send in a
     assert.equal(events.includes('selectConversation'), false);
   }
 });
+
+
+test('worker refresh during fill or send waiting never reopens a job or repeats a send', async () => {
+  for (const phase of ['waitingFill', 'waitingSend']) {
+    const { events, result } = await run({ phase });
+    assert.equal(result.ok, false); assert.match(result.error, /工作页已重载/);
+    assert.equal(events.includes('contact'), false); assert.equal(events.includes('fill'), false);
+    assert.equal(events.includes('send'), false); assert.equal(events.some(x => x.startsWith('navigate:')), false);
+  }
+});

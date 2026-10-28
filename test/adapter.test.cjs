@@ -331,7 +331,7 @@ test('v3 saved name and company defaults migrate without resetting custom profil
 });
 test('diagnostic distinguishes a readable position card from a platform ID and never leaks field text', () => {
   const { a } = positionChat();
-  const result = a.diagnostic(); assert.match(result.identity, /页面未提供岗位 ID/);
+  const result = a.diagnostic(); assert.match(result.identity, /仅诊断，不用于发送目标比对/);
   assert.equal(result.counts.chatHeader, 1);
   assert.equal(JSON.stringify(result).includes('测试招聘者'), false);
   assert.equal(JSON.stringify(result).includes('200-300'), false);
@@ -471,4 +471,12 @@ test('chat readiness does not read or compare job IDs, titles or recruiter ident
   a.doc.selectors[P.chatEmpty] = [element()]; assert.throws(() => a.assertChatReady(), /未展开/);
   a.doc.selectors[P.chatEmpty] = []; a.doc.selectors[P.composer] = [];
   assert.throws(() => a.assertChatReady(), /唯一元素/);
+});
+
+
+test('default adapter no longer exposes attachment or reply adaptation fields', () => {
+  const a = adapter({}, { resumeOpen: '.old', verifiedReply: true });
+  for (const key of ['resumeOpen', 'resumeDialog', 'resumeReceipt', 'verifiedReply', 'verifiedResume', 'conversationName']) {
+    assert.equal(Object.hasOwn(P, key), false); assert.equal(Object.hasOwn(a.p, key), false);
+  }
 });
