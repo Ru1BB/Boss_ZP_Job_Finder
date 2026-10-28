@@ -302,22 +302,6 @@
           rich: this.richNodes(n).length > 0 }];
       });
     }
-    selectConversation(job) {
-      this.health();
-      let matches = this.nodes(this.p.conversation).filter(n => n.getAttribute(this.p.conversationRecruiterAttr) === job.recruiterId && n.getAttribute(this.p.conversationJobAttr) === job.jobId);
-      if (!matches.length && job.recruiterName && job.company) {
-        matches = this.nodes(this.p.conversationRow).filter(n => {
-          const rid = n.getAttribute(this.p.conversationRecruiterAttr), jid = n.getAttribute(this.p.conversationJobAttr);
-          if (rid && rid !== job.recruiterId || jid && jid !== job.jobId) return false;
-          return this.uniqueText(this.p.conversationName, n, true) === job.recruiterName && this.uniqueText(this.p.conversationCompany, n) === job.company;
-        });
-      }
-      if (matches.length !== 1) {
-        const error = new Error(matches.length ? '同公司同招聘者出现多个会话，需人工核对' : '目标招聘者会话尚未加载，或公司/招聘者字段不匹配');
-        error.code = matches.length ? 'CHAT_AMBIGUOUS' : 'CHAT_NOT_FOUND'; throw error;
-      }
-      matches[0].click();
-    }
     editor() { return this.one(this.p.composer); }
     normalizeEditorText(text) {
       return String(text ?? '').replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ').trim();

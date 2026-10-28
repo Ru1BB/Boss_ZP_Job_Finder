@@ -132,11 +132,11 @@ test('manual stop during health recovery prevents refresh and further actions', 
 });
 test('worker health metadata preserves global challenges versus local temporary failures', async () => {
   for (const kind of ['verification', 'login', 'restriction', 'transient']) {
-    const r = runtime({ autoSend: true }); r.api.start(); const entry = chatEntry(r, kind);
+    const r = runtime({ autoSend: true }); r.api.start(); const entry = chatEntry(r, kind); entry.status = 'eligible'; entry.taskId = r.state().task.id; entry.analysis = { greeting: '您好' };
     workerStub(r, () => ({ ok: false, error: '页面异常', healthIssue: { kind } }));
     await r.api.pump();
     assert.equal(r.state().task.status === 'running', kind === 'transient');
-    if (kind === 'transient') { assert.equal(r.state().entries[entry.key].handoff, false); assert.equal(r.state().entries[entry.key].retry.action, 'history'); }
+    if (kind === 'transient') { assert.equal(r.state().entries[entry.key].handoff, false); assert.equal(r.state().entries[entry.key].retry.action, 'send'); }
   }
 });
 function modelResult() {
@@ -192,16 +192,6 @@ test('manual stop cancels persisted delayed retries without starting any new pag
   await r.api.pump(); assert.equal(r.state().task.status, 'stopped');
 });
 
-test('successful delayed history retry clears the temporary failure and resumes polling', async () => {
-  const r = runtime({ autoSend: true }); r.api.start(); const entry = chatEntry(r, 'temporary'); let calls = 0;
-  workerStub(r, () => ++calls === 1 ? { ok: false, error: '等待聊天窗口超时' } : { ok: true, data: [] });
-  await r.api.pump(); assert.equal(r.state().entries[entry.key].retry.attempt, 1);
-  for (let i = 0; i < 13; i++) r.advance(5000);
-  r.state().task.nextChatAt = 0; await r.api.pump();
-  assert.equal(calls, 2); assert.equal(r.state().entries[entry.key].retry, undefined);
-  assert.equal(r.state().entries[entry.key].handoff, false);
-});
-
 test('temporary send failure before any page click retries the existing reservation once without extra quota', async () => {
   const r = runtime({ autoSend: true, sendIntervalSeconds: 1 }); r.api.start();
   const job = { jobId: 'safe', recruiterId: 'r', url: 'https://www.zhipin.com/job_detail/safe.html' }, key = C.pair(job);
@@ -217,15 +207,15 @@ test('temporary send failure before any page click retries the existing reservat
 test('temporary errors after opening or clicking send never schedule automatic replays', async () => {
   for (const stage of ['opening', 'drafting', 'clicked']) {
     const r = runtime({ autoSend: true }); r.api.start(); const entry = chatEntry(r, stage);
-    entry.pendingReply = { kind: 'reply', payload: { text: '您好' } };
+    entry.status = 'eligible'; entry.taskId = r.state().task.id; entry.analysis = { greeting: '您好' };
     workerStub(r, cmd => { r.store.set('bossai.v1.sendStage.' + cmd.sendId, { stage, commandId: cmd.id }); return { ok: false, error: '操作按钮不可用' }; });
     await r.api.pump(); assert.equal(r.state().entries[entry.key].retry, undefined);
     assert.equal(r.state().entries[entry.key].handoff, true);
   }
 });
 test('safe delayed send reservations survive refresh without being turned into uncertain sends', async () => {
-  const original = runtime({ autoSend: true }); original.api.start(); const entry = chatEntry(original, 'queued');
-  const item = C.reserve(original.state(), original.c, original.context.Date.now(), 'reply', entry, { text: '您好' });
+  const original = runtime({ autoSend: true }); original.api.start(); const entry = chatEntry(original, 'queued'); entry.status = 'eligible';
+  const item = C.reserve(original.state(), original.c, original.context.Date.now(), 'contact', entry, { text: '您好' });
   original.store.set('bossai.v1.sendStage.' + item.id, { stage: 'prepared', commandId: 'failed-before-opening' });
   entry.retry = { action: 'send', sendId: item.id, taskId: original.state().task.id, at: original.context.Date.now() + 60000, attempt: 1 };
   original.api.releaseLease(); const restored = runtime({ autoSend: true }, original.store, 2000);
@@ -329,16 +319,6 @@ test('recovery still pauses if an old worker cannot be closed', async () => {
   assert.ok(r.state().logs.some(x => x.message.includes('旧工作页关闭未确认')));
 });
 
-test('slow chat polling schedules its next turn from completion so job scanning gets a turn', async () => {
-  const r = runtime({ autoSend: true, refreshMinSeconds: 10, refreshMaxSeconds: 15 }); r.api.start(); chatEntry(r, 'slow');
-  workerStub(r, cmd => { assert.equal(cmd.type, 'history'); r.advance(22000); r.advance(2000); return { ok: true, data: [] }; });
-  await r.api.pump();
-  assert.ok(r.state().task.nextChatAt > r.context.Date.now(), 'chat deadline must be after completion');
-  r.context.BossAdapter.Adapter.prototype.cards = () => [];
-  r.context.BossAdapter.Adapter.prototype.advance = () => 'end';
-  await r.api.pump(); assert.equal(r.state().task.exhausted, true);
-});
-
 test('starting a new task with old conversations reads a job before polling chats', async () => {
   const r = runtime({ autoSend: true, refreshMinSeconds: 10, refreshMaxSeconds: 15 }); r.api.start(); chatEntry(r, 'old-chat');
   r.api.stop('重新启动', true); r.api.start();
@@ -396,25 +376,9 @@ test('manual stop after a failed AI call prevents subsequent retry requests', as
   await assert.rejects(r.api.analyze(r.c, { jobId: 'j' })); assert.equal(calls, 1);
 });
 
-test('bad chat history quarantines only that conversation and the next conversation is processed', async () => {
-  const r = runtime({ autoSend: true }); r.api.start(); const first = chatEntry(r, 'first'), second = chatEntry(r, 'second'); const read = [];
-  workerStub(r, cmd => { read.push(cmd.args.job.jobId); return cmd.args.job.jobId === 'first' ? { ok: false, error: '消息缺少唯一 ID 或 ID 重复' } : { ok: true, data: [] }; });
-  await r.api.pump(); assert.equal(r.state().task.status, 'running'); assert.equal(r.state().entries[first.key].handoff, true);
-  r.advance(61000); r.advance(2000); await r.api.pump();
-  assert.deepEqual(read, ['first', 'second']); assert.equal(r.state().entries[second.key].handoff, undefined);
-});
-
-test('uncalibrated attachment is skipped without consuming quota or stopping the task', async () => {
-  const r = runtime({ autoSend: true }); r.api.start(); const entry = chatEntry(r, 'resume');
-  entry.pendingReply = { kind: 'resume', payload: { resumeName: '测试.pdf' } };
-  await r.api.pump(); assert.equal(r.state().task.status, 'running');
-  assert.equal(r.state().entries[entry.key].handoff, true); assert.equal(r.state().entries[entry.key].pendingReply, undefined);
-  assert.equal(r.state().outbox.length, 0);
-});
-
 test('a failed clicked send remains uncertain and is not retried while the task continues', async () => {
   const r = runtime({ autoSend: true }); r.api.start(); const entry = chatEntry(r, 'send');
-  entry.pendingReply = { kind: 'reply', payload: { text: '您好' } }; let calls = 0;
+  entry.status = 'eligible'; entry.taskId = r.state().task.id; entry.analysis = { greeting: '您好' }; let calls = 0;
   workerStub(r, cmd => { calls++; r.store.set('bossai.v1.sendStage.' + cmd.sendId, { stage: 'clicked', commandId: cmd.id });
     r.store.set('bossai.v1.consumed.' + cmd.id, true); return { ok: false, error: '无法判别消息方向，已停止该会话' }; });
   await r.api.pump(); assert.equal(r.state().task.status, 'running'); assert.equal(r.state().outbox[0].status, 'uncertain');
@@ -422,7 +386,7 @@ test('a failed clicked send remains uncertain and is not retried while the task 
 });
 
 test('login and platform restrictions still stop globally even inside a chat action', async () => {
-  const r = runtime({ autoSend: true }); r.api.start(); chatEntry(r, 'blocked');
+  const r = runtime({ autoSend: true }); r.api.start(); const entry = chatEntry(r, 'blocked'); entry.status = 'eligible'; entry.taskId = r.state().task.id; entry.analysis = { greeting: '您好' };
   workerStub(r, () => ({ ok: false, error: '检测到登录、验证或平台限制，请手动处理后重新启动' }));
   await r.api.pump(); assert.equal(r.state().task.status, 'paused');
 });
@@ -433,15 +397,6 @@ test('an unreadable job is marked visited and later jobs are still inspected', a
   await r.api.pump(); assert.equal(r.state().task.status, 'running'); assert.ok(r.state().task.visited.includes('first'));
   r.advance(61000); r.advance(2000); await r.api.pump();
   await r.api.pump(); assert.deepEqual(seen, ['first', 'second']);
-});
-
-test('an attachment selection failure is isolated after reservation', async () => {
-  const r = runtime({ autoSend: true, resumeName: '指定.pdf', profile: { verifiedResume: true } }); r.api.start();
-  const entry = chatEntry(r, 'resume-worker'); entry.pendingReply = { kind: 'resume', payload: { resumeName: '指定.pdf' } };
-  workerStub(r, () => ({ ok: false, error: '无法唯一识别指定简历' }));
-  await r.api.pump(); assert.equal(r.state().task.status, 'running');
-  assert.equal(r.state().entries[entry.key].handoff, true); assert.equal(r.state().entries[entry.key].pendingReply, undefined);
-  assert.equal(r.state().outbox.length, 0);
 });
 
 test('manual stop blocks scheduler restart for the same Beijing time window', async () => {
@@ -567,23 +522,6 @@ test('expired task is stopped before any DOM job scan or AI call', async () => {
 test('non-search BOSS tabs cannot own the main execution lease', () => {
   const r = runtime(); r.location.pathname = '/web/geek/chat';
   assert.equal(r.api.renewLease(), false); assert.throws(() => r.api.start());
-});
-test('critical matters and rich messages transfer before calling AI', async () => {
-  const r = runtime();
-  for (const m of [{ text: '明天可以来面试吗', rich: false }, { text: '', rich: true }]) {
-    const decision = await r.api.chatDecision(r.c, {}, [{ id: 'i1', role: 'recruiter', ...m }]);
-    assert.equal(decision.action, 'handoff');
-  }
-});
-test('resume request transfers to human without an AI call', async () => {
-  const r = runtime();
-  const decision = await r.api.chatDecision(r.c, {}, [{ id: 'i1', role: 'recruiter', text: '请发一份简历', rich: false }]);
-  assert.equal(decision.action, 'handoff'); assert.match(decision.reason, /手动处理/); assert.equal(decision.inboundId, 'i1');
-});
-test('no new recruiter messages means no duplicate AI reply', async () => {
-  const r = runtime();
-  assert.equal(await r.api.chatDecision(r.c, { lastInbound: 'i1' }, [{ id: 'i1', role: 'recruiter', text: '您好', rich: false }]), null);
-  assert.equal(await r.api.chatDecision(r.c, {}, [{ id: 'o1', role: 'candidate', text: '您好', rich: false }]), null);
 });
 test('AI request targets the custom endpoint and does not follow redirects', async () => {
   const r = runtime({ baseUrl: 'https://maas.qianwenaiapi.com/compatible-mode/v1', model: 'qwen3.8-flash' });
@@ -973,15 +911,6 @@ test('existing AI greeting is recorded as a duplicate rather than an unknown del
 });
 
 
-test('recruiter rejection stops that conversation before any AI request, ignoring candidate text', async () => {
-  const r = runtime(); let calls = 0;
-  r.context.GM_xmlhttpRequest = () => { calls++; throw new Error('unexpected request'); };
-  const decision = await r.api.chatDecision(r.c, {}, [{ id: 'no1', role: 'recruiter', text: '您的经验与我们当前项目的需求并不完全吻合。', rich: false }]);
-  assert.equal(decision.action, 'handoff'); assert.equal(decision.text, ''); assert.match(decision.reason, /已婉拒或拒绝/); assert.equal(calls, 0);
-  assert.equal(await r.api.chatDecision(r.c, {}, [{ id: 'own1', role: 'candidate', text: '不合适', rich: false }]), null);
-});
-
-
 test('stopping during the before-open delay prevents opening a worker', async () => {
   const r = runtime({ beforeOpenSeconds: 2, refreshMinSeconds: 1, refreshMaxSeconds: 1 }); r.api.start();
   r.context.BossAdapter.Adapter.prototype.cards = () => [{ jobId: 'delay-job', url: 'https://www.zhipin.com/job_detail/delay-job.html' }];
@@ -989,4 +918,19 @@ test('stopping during the before-open delay prevents opening a worker', async ()
   r.context.GM_openInTab = () => { opened = true; throw new Error('must not open'); };
   r.context.setTimeout = fn => { r.api.stop('用户停止', true); queueMicrotask(fn); };
   await r.api.pump(); assert.equal(opened, false); assert.equal(r.state().task.status, 'stopped');
+});
+
+
+test('legacy conversations and queued replies never cause inbox polling or sending', async () => {
+  const r = runtime({ autoSend: true }); r.api.start();
+  const entry = chatEntry(r, 'legacy'); entry.pendingReply = { kind: 'reply', payload: { text: '旧回复' } };
+  entry.retry = { action: 'history', at: 0, taskId: r.state().task.id };
+  r.state().outbox.push({ id: 'old-reply', kind: 'reply', key: entry.key, taskId: r.state().task.id, status: 'pending' });
+  r.context.BossAdapter.Adapter.prototype.cards = () => [];
+  r.context.BossAdapter.Adapter.prototype.advance = () => 'end';
+  r.context.GM_openInTab = () => assert.fail('must not open chat pages');
+  r.context.GM_xmlhttpRequest = () => assert.fail('must not generate chat replies');
+  await r.api.pump(); assert.equal(r.state().task.status, 'running');
+  assert.equal(r.state().entries[entry.key].pendingReply, undefined); assert.equal(r.state().entries[entry.key].retry, undefined);
+  assert.equal(r.state().outbox[0].status, 'uncertain'); assert.equal(r.api.chatDecision, undefined);
 });

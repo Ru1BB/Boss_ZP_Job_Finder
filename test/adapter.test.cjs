@@ -307,21 +307,6 @@ test('empty-chat placeholder is not treated as a loaded conversation', () => {
   assert.equal(a.chatReady(), false); assert.throws(() => a.identity(), /尚未选中/);
   assert.throws(() => adapter().identity(), /未找到聊天容器/);
 });
-test('observed list rows require an exact unique company and recruiter match', () => {
-  let clicks = 0;
-  const row = element({}, '', { [P.conversationName]: [element({}, '测试招聘者')], [P.conversationCompany]: [element({}, '示例公司')] });
-  row.click = () => clicks++;
-  const a = adapter({ [P.conversationRow]: [row] });
-  const job = { jobId: 'job1', recruiterId: 'visible-context:x', recruiterName: '测试招聘者', company: '示例公司' };
-  a.selectConversation(job); assert.equal(clicks, 1);
-  assert.throws(() => a.selectConversation({ ...job, company: '其他公司' }), e => e.code === 'CHAT_NOT_FOUND');
-  a.doc.selectors[P.conversationRow].push(row);
-  assert.throws(() => a.selectConversation(job), e => e.code === 'CHAT_AMBIGUOUS'); assert.equal(clicks, 1);
-});
-test('explicit conflicting row IDs cannot be overridden by matching names', () => {
-  const row = element({ 'data-job-id': 'other-job' }, '', { [P.conversationName]: [element({}, '测试招聘者')], [P.conversationCompany]: [element({}, '示例公司')] });
-  assert.throws(() => adapter({ [P.conversationRow]: [row] }).selectConversation({ jobId: 'job1', recruiterId: 'r', recruiterName: '测试招聘者', company: '示例公司' }), /尚未加载/);
-});
 test('legacy saved defaults migrate but custom selectors are preserved', () => {
   const a = adapter({}, { version: 2, chatHeader: '.chat-info, .chat-header, .conversation-header', messages: '[data-message-id]', messageIdAttr: 'data-message-id' });
   assert.equal(a.p.chatHeader, P.chatHeader); assert.equal(a.p.messages, P.messages); assert.equal(a.p.messageIdAttr, 'data-mid');

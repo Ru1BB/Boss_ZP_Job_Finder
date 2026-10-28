@@ -88,12 +88,12 @@ test('retired late-loading workers cannot send and close attempts remain bounded
 });
 
 test('temporary read failure refreshes once and then continues without sending', async () => {
-  const r = await run({ type: 'history', healthKind: 'transient', recoverOnReload: true, extraTicks: 4 });
+  const r = await run({ type: 'inspect', healthKind: 'transient', recoverOnReload: true, extraTicks: 4 });
   assert.equal(r.result.ok, true); assert.equal(r.events.filter(x => x === 'reloadWorker').length, 1);
   assert.equal(r.events.includes('send'), false);
 });
 test('persistent temporary read failure is returned after only one refresh', async () => {
-  const r = await run({ type: 'history', healthKind: 'transient', extraTicks: 7 });
+  const r = await run({ type: 'inspect', healthKind: 'transient', extraTicks: 7 });
   assert.equal(r.result.ok, false); assert.equal(r.result.healthIssue.kind, 'transient');
   assert.equal(r.events.filter(x => x === 'reloadWorker').length, 1);
 });
@@ -137,21 +137,6 @@ test('plugin introduction alone is not a receipt but still prevents duplicate fi
   assert.equal(prior.result.data.priorAI, true); assert.equal(prior.events.includes('send'), false);
 });
 
-test('a new outgoing reply without an AI footer is still a valid receipt', async () => {
-  const r = await run({ type: 'reply', history: [{ id: 'in1', role: 'recruiter', text: '有什么经历' }] });
-  assert.equal(r.result.data.confirmed, true);
-});
-
-test('old messages and incoming messages cannot confirm a reply send', async () => {
-  for (const options of [{ noReceipt: true }, { receiptText: '招聘者说 AI', receiptRole: 'recruiter' }]) {
-    const { result } = await run({ type: 'reply', history: [
-      { id: 'oldAI', role: 'candidate', text: '之前的 AI 消息' },
-      { id: 'in1', role: 'recruiter', text: '请介绍项目经验' }
-    ], ...options });
-    assert.equal(result.data.confirmed, false);
-  }
-});
-
 test('worker passes the explicit identity opt-out to drafting and receipt checks', async () => {
   const { events, result } = await run({ wrongIdentity: true, verifyChatWindow: false });
   assert.equal(result.ok, true); assert.equal(result.data.confirmed, true);
@@ -163,15 +148,6 @@ test('disabling auto-send during drafting prevents send and closes the worker', 
   const { events, result } = await run({ disableDuringFill: true });
   assert.equal(result.ok, false); assert.equal(events.includes('send'), false); assert.ok(events.includes('closeWorker'));
 });
-test('reading a conversation closes the worker after returning data', async () => {
-  const { events, result } = await run({ type: 'history' });
-  assert.equal(result.ok, true); assert.ok(Array.isArray(result.data)); assert.ok(events.includes('closeWorker'));
-});
-test('worker sends replies without the removed footer', async () => {
-  const { result, history } = await run({ type: 'reply', history: [{ id: 'in1', role: 'recruiter', text: '你有什么项目经验', rich: false }] });
-  assert.equal(result.data.confirmed, true); assert.equal(history.at(-1).text.endsWith(C.AI_NOTICE), false);
-  assert.equal(history.at(-1).text.includes(C.PROJECT_URL), false);
-});
 test('platform default greeting blocks an extra custom greeting', async () => {
   const { events, result } = await run({ history: [{ id: 'old', role: 'candidate', text: '平台默认招呼' }] });
   assert.equal(result.data.confirmed, false); assert.equal(events.includes('send'), false);
@@ -180,23 +156,10 @@ test('an outgoing AI notice skips greeting without claiming an uncertain send', 
   const { events, result } = await run({ history: [{ id: 'old', role: 'candidate', text: '您好\n' + C.AI_NOTICE }] });
   assert.equal(result.data.priorAI, true); assert.equal(events.includes('send'), false);
 });
-test('approved recovery opens the existing conversation without clicking contact again', async () => {
-  const { events, result } = await run({ phase: 'detail', alreadyContacted: true, retryApproved: true, extraTicks: 1 });
-  assert.equal(result.data.confirmed, true); assert.equal(events.includes('contact'), false);
-  assert.ok(events.some(e => e.startsWith('navigate:')));
-});
-
-test('blank chat page selects the target once and waits before sending', async () => {
-  const { events, result } = await run({ phase: 'opening', emptyChat: true, extraTicks: 1 });
-  assert.equal(result.ok, true); assert.equal(result.data.confirmed, true);
-  assert.equal(events.filter(x => x === 'selectConversation').length, 1);
-  assert.equal(events.filter(x => x === 'send').length, 1);
-  assert.equal(events.includes('contact'), false);
-});
 test('a target conversation that never loads times out without another contact click or send', async () => {
   const { events, result } = await run({ phase: 'opening', emptyChat: true, neverLoads: true, extraTicks: 3, tickMs: 14000 });
-  assert.equal(result.ok, false); assert.match(result.error, /聊天窗口超时/);
-  assert.equal(events.filter(x => x === 'selectConversation').length, 1);
+  assert.equal(result.ok, false); assert.match(result.error, /聊天窗口未自动展开/);
+  assert.equal(events.filter(x => x === 'selectConversation').length, 0);
   assert.equal(events.includes('contact'), false); assert.equal(events.includes('send'), false);
 });
 test('stop signal immediately before click cancels send', async () => {
@@ -231,7 +194,7 @@ test('expired window, wrong identity and verification block all sends', async ()
 });
 test('even a verified requested attachment never opens or sends a file', async () => {
   const { events, result } = await run({ type: 'resume' });
-  assert.equal(result.ok, false); assert.match(result.error, /附件自动发送已停用/); assert.equal(events.includes('resumeSend'), false); assert.equal(events.includes('resumeOpen'), false);
+  assert.equal(result.ok, false); assert.match(result.error, /功能已移除/); assert.equal(events.includes('resumeSend'), false); assert.equal(events.includes('resumeOpen'), false);
 });
 test('attachment mismatch and no explicit request never send files', async () => {
   for (const opts of [{ ambiguousResume: true }, { history: [{ id: 'in1', role: 'recruiter', text: '不用发简历', rich: false }] }]) {
@@ -247,4 +210,14 @@ test('configurable delays still allow one send but stop prevents filling or clic
   assert.equal(beforeFill.events.includes('fill'), false); assert.equal(beforeFill.events.includes('send'), false);
   const beforeSend = await run({ sendDelay: 1000, stopDuringDelay: true });
   assert.equal(beforeSend.events.includes('fill'), true); assert.equal(beforeSend.events.includes('send'), false);
+});
+
+
+test('removed reply, history and attachment commands cannot inspect or send in a worker', async () => {
+  for (const type of ['reply', 'history', 'resume']) {
+    const { events, result } = await run({ type });
+    assert.equal(result.ok, false); assert.match(result.error, /功能已移除/);
+    assert.equal(events.includes('send'), false); assert.equal(events.includes('fill'), false);
+    assert.equal(events.includes('selectConversation'), false);
+  }
 });
