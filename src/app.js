@@ -1,6 +1,6 @@
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.38';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.39';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -940,7 +940,7 @@
       *{box-sizing:border-box}button,input,textarea,select{font:inherit}button{cursor:pointer;border:1px solid #cbd8de;border-radius:7px;padding:7px 11px;background:white;color:#173644}button:hover{background:#edf7f6}
       .launch,.primary{background:#087e77;color:#fff;border:0}.danger{background:#a52c36;color:white;border:0}.muted{color:#5b6e79;font-size:12px} .warn{color:#925113}
       .panel{display:none;width:min(520px,95vw);max-height:88vh;overflow:auto;background:#fff;border:1px solid #c8dbdd;border-radius:14px;box-shadow:0 12px 50px #102c3a40}
-      header{padding:16px 18px;background:#eaf6f4;display:flex;justify-content:space-between;align-items:center}h2{font-size:17px;margin:0}main{padding:16px}label{display:block;margin:9px 0 4px;font-size:13px}
+      header{position:sticky;top:0;z-index:2;padding:16px 18px;background:#eaf6f4;display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid #c8dbdd}header h2{min-width:0}header #close{flex-shrink:0}h2{font-size:17px;margin:0}main{padding:16px}label{display:block;margin:9px 0 4px;font-size:13px}
       input:not([type=checkbox]),textarea,select{width:100%;border:1px solid #bdcdd4;border-radius:6px;padding:8px;color:#172b3a;background:#fff}textarea{min-height:74px;resize:vertical}.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}.actions{display:flex;flex-wrap:wrap;gap:7px;margin:12px 0}details{border-top:1px solid #e1e9eb;margin-top:14px;padding-top:10px}summary{cursor:pointer;font-weight:600}.status{white-space:pre-wrap;padding:10px;background:#f2f6f8;border-radius:7px;font-size:12px}.entry{border-bottom:1px solid #dfe7e9;padding:10px 0}.entry p{margin:4px 0;white-space:pre-wrap;overflow-wrap:anywhere}a{color:#087e77}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px} .pill{border-radius:10px;background:#eaf6f4;padding:2px 6px;font-size:12px}
       </style><button class="launch" id="launch">💼 AI 求职助手</button>
       <section class="panel" id="panel"><header><h2>AI 求职助手 v${VERSION} <span class="pill">试运行优先</span></h2><button id="close">收起</button></header><main>
