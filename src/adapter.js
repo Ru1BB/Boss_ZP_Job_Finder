@@ -36,7 +36,6 @@
   class Adapter {
     constructor(doc = document, profile = {}, knownJobs = [], options = {}) {
       this.doc = doc; this.p = { ...DEFAULT_PROFILE, ...profile }; this.knownJobs = knownJobs;
-      this.verifyChatWindow = options.verifyChatWindow !== false;
       if (profile.contact === '.op-btn-chat') this.p.contact = DEFAULT_PROFILE.contact;
       // Migrate only shipped defaults; preserve deliberate custom selectors.
       const legacy = { chatHeader: '.chat-info, .chat-header, .conversation-header', messages: '[data-message-id]',
@@ -222,28 +221,9 @@
       if (!job.jobId) throw new Error('聊天页缺少岗位 ID，无法核对岗位');
       return job;
     }
-    assertIdentity(job) {
-      if (!this.verifyChatWindow) {
-        // The user explicitly opts out of identity comparison, not UI readiness.
-        if (!this.chatReady()) throw new Error('聊天窗口未展开，不能发送；请先打开会话');
-        this.editor();
-        return;
-      }
-      const actual = this.identity();
-      root.BossCore.pair(job);
-      if (actual.identityType === 'visible-fields') {
-        // No job ID is invented. Match only the job title to a detail page
-        // whose contact button explicitly targeted the expected job ID.
-        if (job.contactTargetJobId !== job.jobId) throw new Error('可见字段核对需要详情页沟通按钮绑定本岗位，请重新读取职位');
-        const fields = [['title', '岗位名称', '']];
-        for (const [key, label, kind] of fields) {
-          const expected = this.normalizeField(job[key], kind);
-          if (!expected || expected !== this.normalizeField(actual[key], kind)) throw new Error('当前会话的' + label + '与目标职位不一致或字段缺失，已停止');
-        }
-        return;
-      }
-      if (actual.jobId === job.jobId) return;
-      throw new Error('当前会话与目标岗位不一致，已停止');
+    assertChatReady() {
+      if (!this.chatReady()) throw new Error('聊天窗口未展开，不能发送；请先打开会话');
+      this.editor();
     }
     isAvatarImage(media, row) {
       // Observed avatar slot: message row > .message-content > .figure:first-child
@@ -289,7 +269,7 @@
       }).join('\n').trim();
     }
     history(job) {
-      this.health(); this.assertIdentity(job);
+      this.health(); this.assertChatReady();
       const seen = new Set();
       return this.nodes(this.p.messages).flatMap(n => {
         const id = n.getAttribute(this.p.messageIdAttr) || (this.p.messageIdAttr === 'data-mid' ? n.getAttribute('data-message-id') : null);

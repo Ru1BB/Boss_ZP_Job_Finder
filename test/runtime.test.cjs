@@ -35,7 +35,7 @@ test('debug report exposes only execution flags and a read-only DOM snapshot', (
   r.context.GM_xmlhttpRequest = () => { assert.fail('debug must never call AI'); };
   r.context.GM_openInTab = () => { assert.fail('debug must never open or send'); };
   const report = r.api.debugReport();
-  assert.equal(report.checks.verifyChatWindow, false); assert.equal(report.checks.historyAndDuplicateChecks, true);
+  assert.equal(report.checks.chatIdentityComparison, false); assert.equal(report.checks.historyAndDuplicateChecks, true);
   assert.equal(report.checks.receiptChecks, true);
   assert.equal(JSON.stringify(report).includes('PRIVATE-KEY'), false); assert.equal(JSON.stringify(report).includes('PRIVATE-RESUME'), false);
   assert.equal(JSON.stringify([...r.store]), before);

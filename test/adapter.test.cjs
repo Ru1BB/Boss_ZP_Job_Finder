@@ -57,7 +57,7 @@ function messageWithAvatar(role = 'recruiter') {
   image.tagName = 'IMG'; image.className = 'image-circle'; image.matches = selector => selector === 'img.image-circle';
   image.parentElement = figure; figure.parentElement = content; content.parentElement = row; content.firstElementChild = figure;
   row.selectors[P.richMessage] = [image];
-  const a = adapter({ [P.messages]: [row] }); a.assertIdentity = () => {};
+  const a = adapter({ [P.messages]: [row] }); a.assertChatReady = () => {};
   return { a, row, content, figure, image };
 }
 test('the observed BOSS avatar does not turn a text message into rich content', () => {
@@ -272,19 +272,6 @@ test('observed BOSS detail structure binds the communication button to the curre
   const job = a.inspectJob(); assert.equal(job.jobId, 'job1'); assert.equal(job.contactTargetJobId, 'job1');
   assert.equal(job.identityType, 'visible-context'); assert.equal(JSON.stringify(job.identityDiagnostic).includes('not-an-identity'), false);
 });
-test('visible chat identity requires the exact job link without recruiter or company matching', () => {
-  const header = element({}, '', { 'a[href*="/job_detail/"]': [element({ href: 'https://www.zhipin.com/job_detail/job1.html' })],
-    [P.chatRecruiterName]: [element({}, '测试招聘者')], [P.chatCompany]: [element({}, '示例公司')] });
-  const a = adapter({ [P.chatHeader]: [header] });
-  const expected = { jobId: 'job1', recruiterId: 'platform-123', recruiterName: '测试招聘者', company: '示例公司' };
-  assert.doesNotThrow(() => a.assertIdentity(expected));
-  assert.throws(() => a.assertIdentity({ ...expected, jobId: 'job2' }));
-  assert.doesNotThrow(() => a.assertIdentity({ ...expected, company: '其他公司', recruiterName: '' }));
-  header.selectors[P.chatRecruiterName] = []; header.selectors[P.chatCompany] = [];
-  assert.doesNotThrow(() => a.assertIdentity(expected));
-  header.selectors['a[href*="/job_detail/"]'] = [];
-  assert.throws(() => a.assertIdentity(expected));
-});
 test('old default contact selector is migrated to the current button variant', () => {
   assert.ok(adapter({}, { contact: '.op-btn-chat' }).p.contact.includes('.btn-startchat'));
 });
@@ -316,7 +303,7 @@ test('legacy saved defaults migrate but custom selectors are preserved', () => {
 test('observed message IDs and direction are read without silently losing existing messages', () => {
   const message = element({ 'data-mid': 'mid-1' }, '', { [P.messageText]: [element({}, '您好')] });
   message.matches = selector => selector === P.messageIncoming;
-  const a = adapter({ [P.chatHeader]: [chatHeader()], [P.messages]: [message] });
+  const a = adapter({ [P.chatHeader]: [chatHeader()], [P.composer]: [element()], [P.messages]: [message] });
   const history = a.history(a.identity()); assert.equal(history.length, 1); assert.equal(history[0].id, 'mid-1');
   assert.equal(history[0].role, 'recruiter'); assert.equal(history[0].text, '您好');
 });
@@ -330,66 +317,12 @@ function positionChat(overrides = {}) {
   const job = { jobId: 'job1', contactTargetJobId: 'job1', recruiterId: 'expected-platform-id', ...fields };
   return { a: adapter({ [P.chatHeader]: [header] }), header, card, job };
 }
-test('a DIV position card matches only the job title without pretending it supplies a job ID', () => {
-  const { a, job } = positionChat();
-  const actual = a.identity(); assert.equal(actual.identityType, 'visible-fields'); assert.equal(actual.jobId, undefined);
-  assert.equal(actual.title, 'AI 应用开发·实习生'); assert.doesNotThrow(() => a.assertIdentity(job));
-  assert.throws(() => C.pair(actual));
-});
-test('job links in historical messages cannot masquerade as the active job', () => {
-  const { a, header, card, job } = positionChat();
-  header.matches = selector => selector === '.chat-conversation';
-  header.selectors['a[href*="/job_detail/"]'] = [element({ href: 'https://www.zhipin.com/job_detail/history-job.html' })];
-  header.selectors['.top-info-content, .chat-position-content'] = [card];
-  assert.equal(a.identity().identityType, 'visible-fields'); assert.doesNotThrow(() => a.assertIdentity(job));
-  card.selectors['a[href*="/job_detail/"]'] = [element({ href: 'https://www.zhipin.com/job_detail/other-current-job.html' })];
-  assert.throws(() => a.assertIdentity(job), /不一致/);
-});
-test('each mismatching or missing target field blocks a linkless position card', () => {
-  const { a, job } = positionChat();
-  for (const field of ['title']) {
-    assert.throws(() => a.assertIdentity({ ...job, [field]: '其他字段' }), /不一致/);
-    assert.throws(() => a.assertIdentity({ ...job, [field]: '' }), /字段缺失/);
-  }
-  assert.throws(() => a.assertIdentity({ ...job, contactTargetJobId: '' }), /绑定本岗位/);
-  assert.throws(() => a.assertIdentity({ ...job, contactTargetJobId: 'other-job' }), /绑定本岗位/);
-});
-
-test('missing or different recruiter and company fields do not block a matching position card', () => {
-  const { a, header, job } = positionChat();
-  header.selectors[P.chatRecruiterName] = []; header.selectors[P.chatCompany] = [];
-  assert.doesNotThrow(() => a.assertIdentity(job));
-  assert.doesNotThrow(() => a.assertIdentity({ ...job, recruiterName: '其他招聘者', company: '' }));
-  a.knownJobs = [{ ...job, jobId: 'another-job', company: '另一公司', recruiterName: '其他招聘者' }];
-  assert.doesNotThrow(() => a.assertIdentity(job));
-});
-
-test('platform job ID matching does not require a readable recruiter ID', () => {
-  const a = adapter({ [P.chatIdentity]: [element({ [P.chatJobAttr]: 'job1' })] });
-  const job = { jobId: 'job1', recruiterId: 'stored-recruiter' };
-  assert.doesNotThrow(() => a.assertIdentity(job));
-  assert.throws(() => a.assertIdentity({ ...job, jobId: 'job2' }), /不一致/);
-});
-test('same-title known jobs do not veto the requested title-only matching', () => {
-  const { a, job } = positionChat();
-  a.knownJobs = [{ ...job, jobId: 'other-job' }];
-  assert.doesNotThrow(() => a.assertIdentity(job));
-  a.knownJobs = [{ ...job, jobId: 'other-job', title: '另一个实习岗位' }, job];
-  assert.doesNotThrow(() => a.assertIdentity(job));
-});
 test('incomplete position cards and multiple cards do not authorize sending', () => {
   for (const field of ['title']) {
     assert.throws(() => positionChat({ [field]: '' }).a.identity(), /岗位名称字段缺失/);
   }
   const { a, header, card } = positionChat(); header.selectors[P.chatPosition].push(card);
   assert.throws(() => a.identity(), /多个岗位卡片/);
-});
-test('format normalization is limited to spacing, salary dash and city suffix', () => {
-  const { a, job } = positionChat({ salary: '200 – 300 元/天', city: '北京市' });
-  assert.doesNotThrow(() => a.assertIdentity({ ...job, salary: '200-300元/天', city: '北京' }));
-  assert.doesNotThrow(() => a.assertIdentity({ ...job, salary: '200-300元/月' }));
-  assert.throws(() => a.assertIdentity({ ...job, title: 'AI应用开发实习生' }), /岗位名称/);
-  assert.doesNotThrow(() => a.assertIdentity({ ...job, city: '上海' }));
 });
 test('v3 saved name and company defaults migrate without resetting custom profiles', () => {
   const a = adapter({}, { version: 3, chatRecruiterName: '.name, .boss-name', chatCompany: '.company-name, .company' });
@@ -417,7 +350,7 @@ function pkNotice(options = {}) {
   return row;
 }
 function messageHistory(rows) {
-  const a = adapter({ [P.chatHeader]: [chatHeader()], [P.messages]: rows });
+  const a = adapter({ [P.chatHeader]: [chatHeader()], [P.composer]: [element()], [P.messages]: rows });
   return { a, history: a.history(a.identity()) };
 }
 test('the exact competitor-PK system card from the supplied screenshot is excluded from conversation history', () => {
@@ -452,40 +385,12 @@ test('real text outside the known card is retained even if it uses an unknown te
   assert.equal(messageHistory([row]).history.length, 1);
 });
 
-test('title-only matching accepts missing chat salary and city without affecting title rejection', () => {
-  const { a, job } = positionChat({ salary: '', city: '' });
-  assert.doesNotThrow(() => a.assertIdentity({ ...job, salary: '任意薪资', city: '任意城市' }));
-  assert.throws(() => a.assertIdentity({ ...job, title: '另一个岗位' }), /岗位名称/);
-  assert.throws(() => a.assertIdentity({ ...job, title: '' }), /字段缺失/);
-});
-
-test('explicit opt-out skips missing or mismatching job fields but still requires a loaded chat and unique editor', () => {
-  const selectors = { [P.chatHeader]: [element()], [P.composer]: [element()] };
-  const a = adapter(selectors, {}, { verifyChatWindow: false });
-  const job = { jobId: 'target', recruiterId: 'r' };
-  assert.doesNotThrow(() => a.assertIdentity(job));
-  assert.throws(() => adapter(selectors).assertIdentity(job), /岗位名称字段缺失/);
-  selectors[P.chatIdentity] = [element({ [P.chatJobAttr]: 'other' })];
-  assert.doesNotThrow(() => a.assertIdentity(job));
-  selectors[P.chatEmpty] = [element()]; assert.throws(() => a.assertIdentity(job), /未展开/);
-  delete selectors[P.chatEmpty]; selectors[P.composer] = [];
-  assert.throws(() => a.assertIdentity(job), /唯一元素/);
-});
-
-test('position-region fallback reads the title when the position-content wrapper is absent', () => {
-  const { a, header, card, job } = positionChat();
-  header.selectors[P.chatPosition] = [];
-  header.selectors['.chat-position-content'] = [card];
-  assert.doesNotThrow(() => a.assertIdentity(job));
-  card.selectors[P.chatTitle] = [];
-  assert.throws(() => a.assertIdentity(job), /岗位名称字段缺失/);
-});
-
 function editableFixture() {
   const events = [], input = { isContentEditable: true, textContent: '', innerText: '', focus() {}, dispatchEvent(e) { events.push(e.type); } };
   const a = adapter({ [P.composer]: [input] });
   return { a, input, events };
 }
+
 
 test('contenteditable fallback writes rendered multiline text including the AI disclosure', () => {
   const { a, input, events } = editableFixture();
@@ -530,7 +435,7 @@ test('observed attachment system receipt is ignored without inventing a sender',
   const row = debugMessage('receipt-1', text);
   row.matches = selector => selector === '.message-item.item-system';
   row.selectors['.hyper-link.text'] = [element({}, text)];
-  const a = adapter({ [P.messages]: [row] }); a.assertIdentity = () => {};
+  const a = adapter({ [P.messages]: [row] }); a.assertChatReady = () => {};
   assert.equal(a.history({}).length, 0);
   const report = a.debugSnapshot().messages.rowDetails[0];
   assert.equal(report.ignoredSystemCard, true); assert.equal(report.historyRowShapeValid, true);
@@ -543,7 +448,7 @@ test('recruiter quoting an attachment receipt remains an incoming message', () =
   const text = '您的附件简历 测试.pdf 已发送给Boss点击查看附件';
   const row = debugMessage('quoted-receipt', text);
   row.selectors['.hyper-link.text'] = [element({}, text)];
-  const a = adapter({ [P.messages]: [row] }); a.assertIdentity = () => {};
+  const a = adapter({ [P.messages]: [row] }); a.assertChatReady = () => {};
   assert.equal(a.history({})[0].role, 'recruiter');
 });
 
@@ -551,7 +456,19 @@ test('recruiter quoting an attachment receipt remains an incoming message', () =
 test('known BOSS text-content excludes sibling read status but preserves literal status words in the body', () => {
   const row = debugMessage('read-status', '已读\n\n你好，已读这段说明');
   row.selectors[P.messageText][0].selectors['.text-content'] = [element({}, '你好，已读这段说明')];
-  const a = adapter({ [P.messages]: [row] }); a.assertIdentity = () => {};
+  const a = adapter({ [P.messages]: [row] }); a.assertChatReady = () => {};
   assert.equal(a.history({})[0].text, '你好，已读这段说明');
   assert.equal(a.debugSnapshot({ includeMessageText: true }).messages.rowDetails[0].parsedTextPreview, '你好，已读这段说明');
+});
+
+
+test('chat readiness does not read or compare job IDs, titles or recruiter identity', () => {
+  const a = adapter({ [P.chatHeader]: [element()], [P.composer]: [element()] });
+  a.identity = () => assert.fail('identity comparison was removed');
+  assert.doesNotThrow(() => a.assertChatReady());
+  a.doc.selectors[P.messages] = [debugMessage('ready-1', '正常消息')];
+  assert.equal(a.history({ jobId: 'unrelated', title: '不一致的岗位' }).length, 1);
+  a.doc.selectors[P.chatEmpty] = [element()]; assert.throws(() => a.assertChatReady(), /未展开/);
+  a.doc.selectors[P.chatEmpty] = []; a.doc.selectors[P.composer] = [];
+  assert.throws(() => a.assertChatReady(), /唯一元素/);
 });

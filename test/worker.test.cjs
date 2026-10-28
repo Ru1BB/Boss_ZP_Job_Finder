@@ -25,7 +25,7 @@ async function run(options = {}) {
       }
     }
     chatReady() { return options.emptyChat ? events.includes('selectConversation') && !options.neverLoads : true; }
-    assertIdentity() { if (this.verifyChatWindow && options.wrongIdentity) throw new Error('身份不匹配'); }
+    assertChatReady() { if (!this.chatReady()) throw new Error('聊天窗口未展开'); }
     history() { return structuredClone(history); }
     nodes(selector) {
       if (selector === 'receipt') return events.includes('resumeSend') ? [{ innerText: c.resumeName }] : [];
@@ -137,7 +137,7 @@ test('plugin introduction alone is not a receipt but still prevents duplicate fi
   assert.equal(prior.result.data.priorAI, true); assert.equal(prior.events.includes('send'), false);
 });
 
-test('worker passes the explicit identity opt-out to drafting and receipt checks', async () => {
+test('worker sends without comparing chat identity and retains stop checks', async () => {
   const { events, result } = await run({ wrongIdentity: true, verifyChatWindow: false });
   assert.equal(result.ok, true); assert.equal(result.data.confirmed, true);
   assert.equal(events.filter(e => e === 'send').length, 1);
@@ -185,8 +185,8 @@ test('new incoming message while drafting prevents stale send', async () => {
 test('consumed command after page reload is not reissued', async () => {
   const { events, result } = await run({ consumed: true }); assert.equal(result.data.confirmed, false); assert.equal(events.includes('send'), false);
 });
-test('expired window, wrong identity and verification block all sends', async () => {
-  for (const overrides of [{ expired: true }, { wrongIdentity: true }, { blocked: true }]) {
+test('expired window and platform verification still block all sends', async () => {
+  for (const overrides of [{ expired: true }, { blocked: true }]) {
     const { events, result } = await run(overrides);
     if (!overrides.expired) assert.equal(result.ok, false);
     assert.equal(events.includes('send'), false); assert.ok(events.includes('closeWorker'));

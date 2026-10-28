@@ -5,9 +5,10 @@ const C = require('../src/core.js');
 test('debug mode defaults off and cannot change send or identity permissions', () => {
   assert.equal(C.defaults().debugMode, false);
   const c = C.fixedConfig({ debugMode: true }); C.validateConfig(c);
-  assert.equal(c.autoSend, false); assert.equal(c.verifyChatWindow, true);
+  assert.equal(c.autoSend, false); assert.equal(c.verifyChatWindow, undefined);
   assert.throws(() => C.validateConfig({ ...c, debugMode: 'true' }));
 });
+
 
 test('employment URL replaces duplicate types and preserves other search conditions', () => {
   const url = 'https://www.zhipin.com/web/geek/jobs?city=101010100&query=Python&jobType=1903&jobType=1901#example';
@@ -95,12 +96,6 @@ test('open-only requires verification but does not consume quota or send spacing
   item.status = 'opened'; C.clearActivity(s); assert.equal(s.entries[entry.key].hidden, true);
 });
 
-test('chat window verification defaults on for old configs and requires explicit boolean opt-out', () => {
-  assert.equal(C.defaults().verifyChatWindow, true);
-  assert.equal(C.fixedConfig({}).verifyChatWindow, true);
-  assert.equal(C.validateConfig(C.fixedConfig({ verifyChatWindow: false })).verifyChatWindow, false);
-  assert.throws(() => C.validateConfig(C.fixedConfig({ verifyChatWindow: 'false' })), /verifyChatWindow/);
-});
 test('configuration rejects invalid schedules, bounds and inverted jitter', () => {
   for (const overrides of [{ maxContacts: 0 }, { threshold: NaN }, { sendIntervalSeconds: 1.5 },
     { refreshMinSeconds: 61, refreshMaxSeconds: 60 }, { scheduleEnabled: true },
@@ -395,4 +390,13 @@ test('receipt matching requires the actual sent body and outbound direction, all
   assert.equal(C.receiptMatches({ role: 'recruiter', text: '你好' }, '你好'), false);
   assert.equal(C.receiptMatches({ role: 'candidate', text: '' }, ''), false);
   assert.equal(C.receiptMatches({ role: 'candidate', text: '你好', rich: true }, '你好'), false);
+});
+
+
+test('retired chat verification option is stripped from old imported configurations', () => {
+  for (const value of [true, false, 'false']) {
+    const c = C.validateConfig(C.fixedConfig({ verifyChatWindow: value }));
+    assert.equal(Object.hasOwn(c, 'verifyChatWindow'), false);
+    assert.equal(Object.hasOwn(C.publicConfig(c), 'verifyChatWindow'), false);
+  }
 });

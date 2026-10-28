@@ -30,7 +30,7 @@
     threshold: 80, maxContacts: 50, sendIntervalSeconds: 180, aiTimeoutSeconds: 180,
     refreshMinSeconds: 10, refreshMaxSeconds: 60, maxReplies: 5,
     beforeOpenSeconds: 0, beforeFillSeconds: 0, beforeSendSeconds: 0, nextJobSeconds: 0,
-    scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false, verifyChatWindow: true,
+    scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false,
     openRejected: true, verifiedEmptyContact: false,
     switchCategoryOnExhausted: true, debugMode: false,
     resumeName: '', internshipOnly: true, requiredCity: '北京', profile: {}
@@ -73,6 +73,7 @@
     const provider = raw.provider ?? 'qwen';
     if (!Object.hasOwn(PROVIDERS, provider)) fail('不支持的供应商');
     const preset = PROVIDERS[provider], c = { ...defaults(), ...raw, ...preset, provider };
+    delete c.verifyChatWindow; // Retired option: chat identity is no longer compared.
     delete c.categoryLabels; // Retire the old manually entered category list.
     // Do not carry credentials from a previously configured different service to a new destination.
     if (raw.baseUrl && raw.baseUrl !== preset.baseUrl) { c.apiKey = ''; c.autoSend = false; }
@@ -83,7 +84,7 @@
     for (const key of ['baseUrl', 'model', 'apiKey', 'resume', 'preferences', 'screeningPrompt', 'greetingPrompt', 'resumeName', 'requiredCity']) {
       if (typeof c[key] !== 'string') fail(`配置 ${key} 必须是文字`);
     }
-    for (const key of ['autoSend', 'verifyChatWindow', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact', 'switchCategoryOnExhausted', 'debugMode']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
+    for (const key of ['autoSend', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact', 'switchCategoryOnExhausted', 'debugMode']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
     for (const [key, min, max] of [['threshold', 0, 100], ['maxContacts', 1, 500],
       ['beforeOpenSeconds', 0, 3600], ['beforeFillSeconds', 0, 3600], ['beforeSendSeconds', 0, 3600], ['nextJobSeconds', 0, 3600],
       ['sendIntervalSeconds', 1, 86400], ['refreshMinSeconds', 1, 3600],

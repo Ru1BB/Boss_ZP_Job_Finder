@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS AI 求职助手（试运行优先）
 // @namespace    local.boss-ai
-// @version      0.1.42
+// @version      0.1.43
 // @updateURL    https://7355608.site/userscripts/boss-ai.meta.js
 // @downloadURL  https://7355608.site/userscripts/boss-ai.user.js
 // @description  AI 职位筛选、受控沟通与北京时间调度；请先校准页面
@@ -377,7 +377,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     threshold: 80, maxContacts: 50, sendIntervalSeconds: 180, aiTimeoutSeconds: 180,
     refreshMinSeconds: 10, refreshMaxSeconds: 60, maxReplies: 5,
     beforeOpenSeconds: 0, beforeFillSeconds: 0, beforeSendSeconds: 0, nextJobSeconds: 0,
-    scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false, verifyChatWindow: true,
+    scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false,
     openRejected: true, verifiedEmptyContact: false,
     switchCategoryOnExhausted: true, debugMode: false,
     resumeName: '', internshipOnly: true, requiredCity: '北京', profile: {}
@@ -420,6 +420,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     const provider = raw.provider ?? 'qwen';
     if (!Object.hasOwn(PROVIDERS, provider)) fail('不支持的供应商');
     const preset = PROVIDERS[provider], c = { ...defaults(), ...raw, ...preset, provider };
+    delete c.verifyChatWindow; // Retired option: chat identity is no longer compared.
     delete c.categoryLabels; // Retire the old manually entered category list.
     // Do not carry credentials from a previously configured different service to a new destination.
     if (raw.baseUrl && raw.baseUrl !== preset.baseUrl) { c.apiKey = ''; c.autoSend = false; }
@@ -430,7 +431,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     for (const key of ['baseUrl', 'model', 'apiKey', 'resume', 'preferences', 'screeningPrompt', 'greetingPrompt', 'resumeName', 'requiredCity']) {
       if (typeof c[key] !== 'string') fail(`配置 ${key} 必须是文字`);
     }
-    for (const key of ['autoSend', 'verifyChatWindow', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact', 'switchCategoryOnExhausted', 'debugMode']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
+    for (const key of ['autoSend', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact', 'switchCategoryOnExhausted', 'debugMode']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
     for (const [key, min, max] of [['threshold', 0, 100], ['maxContacts', 1, 500],
       ['beforeOpenSeconds', 0, 3600], ['beforeFillSeconds', 0, 3600], ['beforeSendSeconds', 0, 3600], ['nextJobSeconds', 0, 3600],
       ['sendIntervalSeconds', 1, 86400], ['refreshMinSeconds', 1, 3600],
@@ -693,7 +694,6 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
   class Adapter {
     constructor(doc = document, profile = {}, knownJobs = [], options = {}) {
       this.doc = doc; this.p = { ...DEFAULT_PROFILE, ...profile }; this.knownJobs = knownJobs;
-      this.verifyChatWindow = options.verifyChatWindow !== false;
       if (profile.contact === '.op-btn-chat') this.p.contact = DEFAULT_PROFILE.contact;
       // Migrate only shipped defaults; preserve deliberate custom selectors.
       const legacy = { chatHeader: '.chat-info, .chat-header, .conversation-header', messages: '[data-message-id]',
@@ -879,28 +879,9 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       if (!job.jobId) throw new Error('聊天页缺少岗位 ID，无法核对岗位');
       return job;
     }
-    assertIdentity(job) {
-      if (!this.verifyChatWindow) {
-        // The user explicitly opts out of identity comparison, not UI readiness.
-        if (!this.chatReady()) throw new Error('聊天窗口未展开，不能发送；请先打开会话');
-        this.editor();
-        return;
-      }
-      const actual = this.identity();
-      root.BossCore.pair(job);
-      if (actual.identityType === 'visible-fields') {
-        // No job ID is invented. Match only the job title to a detail page
-        // whose contact button explicitly targeted the expected job ID.
-        if (job.contactTargetJobId !== job.jobId) throw new Error('可见字段核对需要详情页沟通按钮绑定本岗位，请重新读取职位');
-        const fields = [['title', '岗位名称', '']];
-        for (const [key, label, kind] of fields) {
-          const expected = this.normalizeField(job[key], kind);
-          if (!expected || expected !== this.normalizeField(actual[key], kind)) throw new Error('当前会话的' + label + '与目标职位不一致或字段缺失，已停止');
-        }
-        return;
-      }
-      if (actual.jobId === job.jobId) return;
-      throw new Error('当前会话与目标岗位不一致，已停止');
+    assertChatReady() {
+      if (!this.chatReady()) throw new Error('聊天窗口未展开，不能发送；请先打开会话');
+      this.editor();
     }
     isAvatarImage(media, row) {
       // Observed avatar slot: message row > .message-content > .figure:first-child
@@ -946,7 +927,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       }).join('\n').trim();
     }
     history(job) {
-      this.health(); this.assertIdentity(job);
+      this.health(); this.assertChatReady();
       const seen = new Set();
       return this.nodes(this.p.messages).flatMap(n => {
         const id = n.getAttribute(this.p.messageIdAttr) || (this.p.messageIdAttr === 'data-mid' ? n.getAttribute('data-message-id') : null);
@@ -1216,7 +1197,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
 
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.42';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.43';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -1986,7 +1967,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
   }
   async function verifyReceipt(adapter, cmd, before, expectedText) {
     for (let i = 0; i < 12; i++) {
-      await sleep(400); workerGuard(cmd, true); adapter.assertIdentity(cmd.args.job);
+      await sleep(400); workerGuard(cmd, true); adapter.assertChatReady();
       const history = adapter.history(cmd.args.job);
       if (history.some(m => !before.includes(m.id) && C.receiptMatches(m, expectedText))) return true;
     }
@@ -2009,7 +1990,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       if (!['inspect', 'contact', 'openOnly'].includes(cmd.type)) throw new Error('自动回复、私信巡检和附件功能已移除');
       const sending = ['contact', 'reply', 'resume', 'openOnly'].includes(cmd.type), c = workerGuard(cmd, sending);
       if (cmd.healthCheck) { delete cmd.healthCheck; put('command', cmd); }
-      const adapter = new Adapter(document, c.profile, Object.values(state().entries).map(entry => entry.job), { verifyChatWindow: c.verifyChatWindow }), job = cmd.args.job;
+      const adapter = new Adapter(document, c.profile, Object.values(state().entries).map(entry => entry.job)), job = cmd.args.job;
       // Persist BEFORE any side effect. After reload, never repeat an uncertain click.
       if (get('consumed.' + cmd.id)) {
         workerFinish(cmd, { confirmed: false, reason: '发送操作已执行过但确认中断，请人工核对' }); return;
@@ -2048,9 +2029,9 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
           }
           return;
         }
-        workerPhase(cmd, 'chat'); adapter.assertIdentity(job);
+        workerPhase(cmd, 'chat'); adapter.assertChatReady();
       }
-      adapter.assertIdentity(job);
+      adapter.assertChatReady();
       const history = adapter.history(job);
       if (cmd.type === 'contact') {
         const status = C.firstContactStatus(history);
@@ -2062,7 +2043,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       const before = history.map(m => m.id);
       workerPhase(cmd, 'waitingFill');
       await guardedDelay(cmd.fillDelay || 0, () => workerGuard(cmd, true));
-      adapter.assertIdentity(job);
+      adapter.assertChatReady();
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id) throw new Error('等待填入期间会话发生变化，取消旧消息');
       sendStage(cmd, 'drafting');
       adapter.fill(text); await sleep(150);
@@ -2070,12 +2051,12 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       for (let i = 0; i < 5 && !adapter.editorMatches(text); i++) {
         workerGuard(cmd, true); await sleep(100);
       }
-      workerGuard(cmd, true); adapter.assertIdentity(job);
+      workerGuard(cmd, true); adapter.assertChatReady();
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id) throw new Error('填写期间会话发生变化，草稿留待人工处理');
       if (!adapter.editorMatches(text)) throw new Error('输入框内容与拟发送消息不一致，取消发送（已等待编辑器同步，草稿保留；请核对换行或网页是否改写内容）');
       workerPhase(cmd, 'waitingSend');
       await guardedDelay(cmd.sendDelay || 0, () => workerGuard(cmd, true));
-      adapter.assertIdentity(job);
+      adapter.assertChatReady();
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id || !adapter.editorMatches(text)) throw new Error('等待发送期间会话或草稿发生变化，取消发送');
       const send = adapter.button(adapter.p.send);
       sendStage(cmd, 'clicked'); put('consumed.' + cmd.id, true); workerGuard(cmd, true); send.click();
@@ -2138,7 +2119,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       <div class="row"><div><label>每次任务最多首聊次数</label><input type="number" name="maxContacts" min="1" max="500"></div><div><label>所有发送动作最小间隔 / 秒</label><input type="number" name="sendIntervalSeconds" min="1"></div></div>
       <div class="row"><div><label>打开职位前等待 / 秒</label><input type="number" name="beforeOpenSeconds" min="0" max="3600"></div><div><label>核对后多久填入招呼 / 秒</label><input type="number" name="beforeFillSeconds" min="0" max="3600"></div></div>
       <div class="row"><div><label>填入后多久点击发送 / 秒</label><input type="number" name="beforeSendSeconds" min="0" max="3600"></div><div><label>多久处理下一个岗位 / 秒</label><input type="number" name="nextJobSeconds" min="0" max="3600"></div></div>
-      <p class="muted">上述四项为基础等待，每次分别加上下面范围内独立抽取的随机秒数；默认基础等待0秒。共用随机范围也用于刷新与聊天扫描。填入及发送等待仅用于首次文字招呼；所有发送仍受最小发送间隔约束。等待中可立即停止，到停止时间取消；等待后重新核对会话和草稿。</p>
+      <p class="muted">上述四项为基础等待，每次分别加上下面范围内独立抽取的随机秒数；默认基础等待0秒。共用随机范围也用于刷新与聊天扫描。填入及发送等待仅用于首次文字招呼；所有发送仍受最小发送间隔约束。等待中可立即停止，到停止时间取消；等待后重新检查消息记录和草稿。</p>
       <div class="row"><div><label>共用随机延迟最小 / 秒</label><input type="number" name="refreshMinSeconds" min="1" max="3600"></div><div><label>共用随机延迟最大 / 秒</label><input type="number" name="refreshMaxSeconds" min="1" max="3600"></div></div>
       <label>AI 请求等待上限 / 秒</label><input type="number" name="aiTimeoutSeconds" min="30" max="600"><p class="muted">默认180秒，可设30–600秒；用于等待完整AI响应，与刷新及发送间隔独立。服务商端的超时不一定随此设置延长。超时按最多3次AI尝试处理，连续失败才暂停；不重试发送点击。</p>
       <p class="muted">默认每轮独立随机等待 10–60 秒；读取完一个职位后刷新搜索页。翻页和滚动也使用随机等待，不重复分析已读职位。AI/加载耗时另计，不保证精确刷新时刻。</p>
@@ -2151,10 +2132,8 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       <label><input type="checkbox" name="openRejected"> 不匹配岗位也仅打开沟通，不填写或发送 AI 消息</label>
       <label class="warn"><input type="checkbox" name="verifiedEmptyContact"> 我已实测确认当前 BOSS 设置点击“立即沟通”不会自动代发默认招呼</label>
       <p class="muted">上述两项及自动发送权限均开启后生效。每个岗位只尝试一次，不计首聊额度，不等待或更新统一发送间隔；仍按随机扫描节奏串行处理。若平台会自动发招呼，请勿勾选确认。搜索耗尽会按随机刷新间隔刷新续跑，不重置任务计数及去重；不保证平台会从搜索结果移除岗位。</p>
-      <label class="warn"><input type="checkbox" name="verifyChatWindow"> 核对聊天窗口（默认开启）</label>
-      <p class="warn">关闭后不比对当前聊天的岗位 ID 或名称，直接使用已打开的聊天窗口，可能发错对象。仍需会话已展开、输入框可用，并保留聊天历史去重、内容校验、发送间隔和额度。先停止任务，调整后保存配置。</p>
-      <p class="muted">关闭：只读取和分析，不向招聘者发送。取消勾选立即生效，取消排队发送；已发内容不能撤回。开启：先停止任务，勾选并保存配置；发送前是否比对聊天岗位由“核对聊天窗口”选项决定。权限仅适用于首次文字招呼；后续回复、附件及卡片由人工处理。</p>
-      <p class="muted">启动即将简历、偏好、必要职位/聊天文字发给所配置 AI 接口。自动化可能受平台限制；不绕过验证码。首次上线请保持试运行。</p>
+      <p class="muted">关闭：只读取和分析，不向招聘者发送。取消勾选立即生效，取消排队发送；已发内容不能撤回。开启：先停止任务，勾选并保存配置；发送时使用当前展开的聊天窗口，不比对聊天岗位。权限仅适用于首次文字招呼；后续回复、附件及卡片由人工处理。</p>
+      <p class="muted">启动即将简历、偏好、必要职位文字发给所配置 AI 接口。自动化可能受平台限制；不绕过验证码。首次上线请保持试运行。</p>
       <div class="actions"><button type="submit" class="primary">保存配置</button><button type="button" id="export">导出配置（不含 Key）</button><button type="button" id="import">导入配置</button><input id="importFile" type="file" accept="application/json" hidden></div></form>
       <details open><summary>职位、招呼与待处理</summary><div id="entries"></div></details><details><summary>运行记录</summary><div id="logs"></div></details>
       </main></section>`;
@@ -2215,7 +2194,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     form.onsubmit = action(() => {
       if (state().task?.status === 'running' || busy || apiTesting) throw new Error('先停止任务并等待AI操作完成，再保存配置');
       const c = read();
-      put('config', c); notify(c.verifyChatWindow ? '配置已保存，聊天窗口核对已开启' : '配置已保存，聊天窗口核对已关闭：将使用当前打开的会话，可能发错对象');
+      put('config', c); notify('配置已保存');
     });
     form.elements.provider.onchange = () => {
       const preset = C.PROVIDERS[form.elements.provider.value];
@@ -2274,10 +2253,10 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
   function debugReport(options = {}) {
     const c = config();
     if (!c.debugMode) throw new Error('请先在配置面板开启调试模式并保存');
-    const adapter = new Adapter(document, c.profile, [], { verifyChatWindow: c.verifyChatWindow });
+    const adapter = new Adapter(document, c.profile, []);
     const s = state(), cmd = get('command');
     return { schemaVersion: 2, scriptVersion: VERSION, capturedAt: new Date().toISOString(),
-      checks: { verifyChatWindow: c.verifyChatWindow, historyAndDuplicateChecks: true, receiptChecks: true },
+      checks: { chatIdentityComparison: false, historyAndDuplicateChecks: true, receiptChecks: true },
       execution: { isWorker: !!workerId, taskStatus: s.task?.status || 'idle',
         action: cmd?.type || null, phase: cmd?.phase || null },
       snapshot: adapter.debugSnapshot({ includeMessageText: options.includeMessageText === true }) };
@@ -2344,7 +2323,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     const waiting = activeRequest ? `\n${activeRequest.purpose}请求中：已等待${Math.max(0, Math.floor((Date.now() - activeRequest.startedAt) / 1000))}秒 / 上限${activeRequest.timeoutSeconds}秒，正文约${activeRequest.inputChars}字符` : '';
     const stats = C.runtimeStats(s), taskLabel = { running: '运行中', paused: '已暂停', stopped: '已停止' };
     const cleanup = s.maintenance ? `\n上次自动清理：${fmt(s.maintenance.at)}，移除${s.maintenance.removed}项过期标记、精简${s.maintenance.compacted}条旧发送正文` : '';
-    q('status').textContent = `${execution} · ${c.autoSend ? '自动发送模式' : '试运行，不发送'} · ${c.verifyChatWindow ? '核对聊天窗口' : '不核对聊天窗口（可能发错对象）'}\n求职类型：${c.internshipOnly ? '实习' : '全职'}\n任务：${taskLabel[t?.status] || '未启动'} · 首聊预约 ${t?.contacts || 0}/${c.maxContacts}（含待核实）\n累计：已评分${stats.analyzed} · 待发送${stats.eligible} · 确认发送${stats.sent} · 发送待核实${stats.uncertain} · 临时重试${stats.retrying} · 待人工${stats.manual}\n下次刷新/扫描：${t?.exhausted ? '已遍历，等待刷新：' + fmt(t?.nextScanAt) : fmt(t?.nextScanAt)}\n停止：${fmt(t?.endAt)}\n${currentActivity()}\n最近情况：${logMessage || s.logs[0]?.message || '暂无记录'}${waiting}${cleanup}`;
+    q('status').textContent = `${execution} · ${c.autoSend ? '自动发送模式' : '试运行，不发送'}\n求职类型：${c.internshipOnly ? '实习' : '全职'}\n任务：${taskLabel[t?.status] || '未启动'} · 首聊预约 ${t?.contacts || 0}/${c.maxContacts}（含待核实）\n累计：已评分${stats.analyzed} · 待发送${stats.eligible} · 确认发送${stats.sent} · 发送待核实${stats.uncertain} · 临时重试${stats.retrying} · 待人工${stats.manual}\n下次刷新/扫描：${t?.exhausted ? '已遍历，等待刷新：' + fmt(t?.nextScanAt) : fmt(t?.nextScanAt)}\n停止：${fmt(t?.endAt)}\n${currentActivity()}\n最近情况：${logMessage || s.logs[0]?.message || '暂无记录'}${waiting}${cleanup}`;
     const entries = q('entries'); entries.replaceChildren();
     const labels = { eligible: '待发送/试运行预览', review: '待人工确认', rejected: '不匹配', existing: '已有沟通，跳过', contacted: '已联系', uncertain: '发送待核实', retryable: '发送前中断，待重新评估' };
     for (const entry of Object.values(s.entries).filter(entry => !entry.hidden).slice(-60).reverse()) {
