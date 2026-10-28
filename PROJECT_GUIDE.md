@@ -194,3 +194,5 @@ BOSSZP/
 0.1.39：面板标题栏使用sticky定位，滚动时持续显示版本号与收起按钮。
 
 0.1.40：beforeOpenSeconds / beforeFillSeconds / beforeSendSeconds / nextJobSeconds 为0–3600秒基础等待，actionDelay统一加上refreshMinSeconds至refreshMaxSeconds随机延迟；发送最小间隔仍独立约束。等待可取消，工作指令时限按已抽取等待预算扩展。
+
+0.1.41：回执按新增消息ID＋本人方向＋实际发送正文归一化一致判断；messageBody优先读取BOSS的.text-content，排除已读状态，不改变历史防重复标记。

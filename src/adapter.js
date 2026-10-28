@@ -280,6 +280,14 @@
       for (const time of this.nodes('.item-time', n)) remaining = remaining.replace(this.normalizeField(time.innerText || time.textContent), '');
       return !remaining.trim();
     }
+    messageBody(row) {
+      return this.nodes(this.p.messageText, row).map(node => {
+        // BOSS places read status beside .text-content inside .text.
+        const contents = this.p.messageText === '.text' ? this.nodes('.text-content', node) : [];
+        if (contents.length) return contents.map(n => n.innerText || n.textContent || '').join('\n');
+        return node.innerText || node.textContent || '';
+      }).join('\n').trim();
+    }
     history(job) {
       this.health(); this.assertIdentity(job);
       const seen = new Set();
@@ -290,7 +298,7 @@
         const incoming = n.matches(this.p.messageIncoming), outgoing = n.matches(this.p.messageOutgoing);
         if (this.isSystemNotice(n)) return [];
         if (incoming === outgoing) throw new Error('无法判别消息方向，已停止该会话');
-        return [{ id, role: incoming ? 'recruiter' : 'candidate', text: this.text(this.p.messageText, n).slice(0, 6000),
+        return [{ id, role: incoming ? 'recruiter' : 'candidate', text: this.messageBody(n).slice(0, 6000),
           rich: this.richNodes(n).length > 0 }];
       });
     }
@@ -430,7 +438,7 @@
         const outgoing = safe(label + '.outgoing', () => node.matches(this.p.messageOutgoing), null);
         const directionKnown = typeof incoming === 'boolean' && typeof outgoing === 'boolean' && incoming !== outgoing;
         const textNodes = safe(label + '.textNodes', () => this.nodes(this.p.messageText, node), []);
-        const text = safe(label + '.text', () => this.text(this.p.messageText, node), '');
+        const text = safe(label + '.text', () => this.messageBody(node), '');
         const rowText = String(node.innerText || node.textContent || '').trim();
         const matchedRich = safe(label + '.rich', () => this.nodes(this.p.richMessage, node), []);
         const ignoredAvatars = matchedRich.filter(media => this.isAvatarImage(media, node));

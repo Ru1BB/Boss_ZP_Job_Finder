@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS AI 求职助手（试运行优先）
 // @namespace    local.boss-ai
-// @version      0.1.40
+// @version      0.1.41
 // @updateURL    https://7355608.site/userscripts/boss-ai.meta.js
 // @downloadURL  https://7355608.site/userscripts/boss-ai.user.js
 // @description  AI 职位筛选、受控沟通与北京时间调度；请先校准页面
@@ -409,6 +409,10 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     if (!body.includes(PROJECT_URL)) body += '\n自动发送项目：' + PROJECT_URL;
     return aiMessage(body);
   }
+  function receiptMatches(message, expected) {
+    const normalize = text => String(text || '').replace(/\r\n?/g, '\n').replace(/[\u200b\ufeff]/g, '').replace(/\s+/g, ' ').trim();
+    return message?.role === 'candidate' && !message.rich && !!normalize(expected) && normalize(message.text) === normalize(expected);
+  }
   function isAIOutgoing(message) {
     return message?.role === 'candidate' && typeof message.text === 'string' && (message.text.includes('AI') || message.text.includes(PROJECT_INTRO));
   }
@@ -647,7 +651,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     }
     return compacted;
   }
-  return { AI_NOTICE, PROJECT_INTRO, PROJECT_URL, aiMessage, anonymousMessage, greetingMessage, isAIOutgoing, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, actionDelay, parseJSON, analysis, reply, pair,
+  return { AI_NOTICE, PROJECT_INTRO, PROJECT_URL, aiMessage, anonymousMessage, greetingMessage, isAIOutgoing, receiptMatches, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, actionDelay, parseJSON, analysis, reply, pair,
     sensitive, wantsResume, isRejection, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner, temporaryFailure, runtimeStats, compactHistory, employmentUrl };
 });
 
@@ -933,6 +937,14 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       for (const time of this.nodes('.item-time', n)) remaining = remaining.replace(this.normalizeField(time.innerText || time.textContent), '');
       return !remaining.trim();
     }
+    messageBody(row) {
+      return this.nodes(this.p.messageText, row).map(node => {
+        // BOSS places read status beside .text-content inside .text.
+        const contents = this.p.messageText === '.text' ? this.nodes('.text-content', node) : [];
+        if (contents.length) return contents.map(n => n.innerText || n.textContent || '').join('\n');
+        return node.innerText || node.textContent || '';
+      }).join('\n').trim();
+    }
     history(job) {
       this.health(); this.assertIdentity(job);
       const seen = new Set();
@@ -943,7 +955,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
         const incoming = n.matches(this.p.messageIncoming), outgoing = n.matches(this.p.messageOutgoing);
         if (this.isSystemNotice(n)) return [];
         if (incoming === outgoing) throw new Error('无法判别消息方向，已停止该会话');
-        return [{ id, role: incoming ? 'recruiter' : 'candidate', text: this.text(this.p.messageText, n).slice(0, 6000),
+        return [{ id, role: incoming ? 'recruiter' : 'candidate', text: this.messageBody(n).slice(0, 6000),
           rich: this.richNodes(n).length > 0 }];
       });
     }
@@ -1083,7 +1095,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
         const outgoing = safe(label + '.outgoing', () => node.matches(this.p.messageOutgoing), null);
         const directionKnown = typeof incoming === 'boolean' && typeof outgoing === 'boolean' && incoming !== outgoing;
         const textNodes = safe(label + '.textNodes', () => this.nodes(this.p.messageText, node), []);
-        const text = safe(label + '.text', () => this.text(this.p.messageText, node), '');
+        const text = safe(label + '.text', () => this.messageBody(node), '');
         const rowText = String(node.innerText || node.textContent || '').trim();
         const matchedRich = safe(label + '.rich', () => this.nodes(this.p.richMessage, node), []);
         const ignoredAvatars = matchedRich.filter(media => this.isAvatarImage(media, node));
@@ -1220,7 +1232,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
 
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.40';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.41';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -2033,14 +2045,11 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       ...(error.healthIssue ? { healthIssue: error.healthIssue } : {}) } : { ok: true, data });
     closeWorkerSelf();
   }
-  async function verifyReceipt(adapter, cmd, before, resumeName) {
+  async function verifyReceipt(adapter, cmd, before, expectedText) {
     for (let i = 0; i < 12; i++) {
       await sleep(400); workerGuard(cmd, true); adapter.assertIdentity(cmd.args.job);
       const history = adapter.history(cmd.args.job);
-      if (resumeName) {
-        const receipts = adapter.nodes(adapter.p.resumeReceipt).filter(n => (n.innerText || '').includes(resumeName));
-        if (receipts.length > before) return true;
-      } else if (history.some(m => (C.isAIOutgoing(m) || cmd.type === 'reply' && m.role === 'candidate' && typeof m.text === 'string' && m.text.trim()) && !before.includes(m.id))) return true;
+      if (history.some(m => !before.includes(m.id) && C.receiptMatches(m, expectedText))) return true;
     }
     return false;
   }
@@ -2151,7 +2160,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id || !adapter.editorMatches(text)) throw new Error('等待发送期间会话或草稿发生变化，取消发送');
       const send = adapter.button(adapter.p.send);
       sendStage(cmd, 'clicked'); put('consumed.' + cmd.id, true); workerGuard(cmd, true); send.click();
-      const confirmed = await verifyReceipt(adapter, cmd, before);
+      const confirmed = await verifyReceipt(adapter, cmd, before, text);
       if (confirmed) sendStage(cmd, 'confirmed');
       workerFinish(cmd, { confirmed, reason: confirmed ? '' : '消息发送回执未确认' });
     } catch (e) {

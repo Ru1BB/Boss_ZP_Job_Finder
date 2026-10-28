@@ -62,6 +62,10 @@
     if (!body.includes(PROJECT_URL)) body += '\n自动发送项目：' + PROJECT_URL;
     return aiMessage(body);
   }
+  function receiptMatches(message, expected) {
+    const normalize = text => String(text || '').replace(/\r\n?/g, '\n').replace(/[\u200b\ufeff]/g, '').replace(/\s+/g, ' ').trim();
+    return message?.role === 'candidate' && !message.rich && !!normalize(expected) && normalize(message.text) === normalize(expected);
+  }
   function isAIOutgoing(message) {
     return message?.role === 'candidate' && typeof message.text === 'string' && (message.text.includes('AI') || message.text.includes(PROJECT_INTRO));
   }
@@ -300,6 +304,6 @@
     }
     return compacted;
   }
-  return { AI_NOTICE, PROJECT_INTRO, PROJECT_URL, aiMessage, anonymousMessage, greetingMessage, isAIOutgoing, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, actionDelay, parseJSON, analysis, reply, pair,
+  return { AI_NOTICE, PROJECT_INTRO, PROJECT_URL, aiMessage, anonymousMessage, greetingMessage, isAIOutgoing, receiptMatches, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, actionDelay, parseJSON, analysis, reply, pair,
     sensitive, wantsResume, isRejection, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner, temporaryFailure, runtimeStats, compactHistory, employmentUrl };
 });

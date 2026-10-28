@@ -387,3 +387,12 @@ test('all four action delays share the configured random range with an independe
   }
   assert.equal(C.fixedConfig({}).beforeOpenSeconds, 0);
 });
+
+
+test('receipt matching requires the actual sent body and outbound direction, allowing display whitespace only', () => {
+  assert.equal(C.receiptMatches({ role: 'candidate', text: '你好\r\n\n项目介绍' }, '你好\n项目介绍'), true);
+  assert.equal(C.receiptMatches({ role: 'candidate', text: '不一样的消息 AI' }, '你好'), false);
+  assert.equal(C.receiptMatches({ role: 'recruiter', text: '你好' }, '你好'), false);
+  assert.equal(C.receiptMatches({ role: 'candidate', text: '' }, ''), false);
+  assert.equal(C.receiptMatches({ role: 'candidate', text: '你好', rich: true }, '你好'), false);
+});

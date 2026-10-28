@@ -561,3 +561,12 @@ test('recruiter quoting an attachment receipt remains an incoming message', () =
   const a = adapter({ [P.messages]: [row] }); a.assertIdentity = () => {};
   assert.equal(a.history({})[0].role, 'recruiter');
 });
+
+
+test('known BOSS text-content excludes sibling read status but preserves literal status words in the body', () => {
+  const row = debugMessage('read-status', '已读\n\n你好，已读这段说明');
+  row.selectors[P.messageText][0].selectors['.text-content'] = [element({}, '你好，已读这段说明')];
+  const a = adapter({ [P.messages]: [row] }); a.assertIdentity = () => {};
+  assert.equal(a.history({})[0].text, '你好，已读这段说明');
+  assert.equal(a.debugSnapshot({ includeMessageText: true }).messages.rowDetails[0].parsedTextPreview, '你好，已读这段说明');
+});

@@ -124,21 +124,21 @@ test('open-only requires no-default-greeting verification and skips existing con
   assert.equal(existing.result.data.existing, true); assert.equal(existing.events.includes('contact'), false);
 });
 
-test('new outgoing AI keyword confirms despite changed wording or formatting', async () => {
+test('an unrelated new outgoing AI message cannot confirm this send', async () => {
   const { events, result } = await run({ receiptText: '网页改写后的招呼 AI' });
-  assert.equal(result.data.confirmed, true);
+  assert.equal(result.data.confirmed, false);
   assert.equal(events.filter(e => e === 'send').length, 1);
 });
 
-test('new plugin introduction confirms a greeting and prevents a duplicate first contact', async () => {
+test('plugin introduction alone is not a receipt but still prevents duplicate first contact', async () => {
   const current = await run({ receiptText: '招呼内容\n' + C.PROJECT_INTRO });
-  assert.equal(current.result.data.confirmed, true);
+  assert.equal(current.result.data.confirmed, false);
   const prior = await run({ history: [{ id: 'old-plugin', role: 'candidate', text: C.PROJECT_INTRO }] });
   assert.equal(prior.result.data.priorAI, true); assert.equal(prior.events.includes('send'), false);
 });
 
 test('a new outgoing reply without an AI footer is still a valid receipt', async () => {
-  const r = await run({ type: 'reply', receiptText: '我有相关项目经验。', history: [{ id: 'in1', role: 'recruiter', text: '有什么经历' }] });
+  const r = await run({ type: 'reply', history: [{ id: 'in1', role: 'recruiter', text: '有什么经历' }] });
   assert.equal(r.result.data.confirmed, true);
 });
 

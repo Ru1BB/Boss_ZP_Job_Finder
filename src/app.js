@@ -1,6 +1,6 @@
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.40';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.41';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -813,14 +813,11 @@
       ...(error.healthIssue ? { healthIssue: error.healthIssue } : {}) } : { ok: true, data });
     closeWorkerSelf();
   }
-  async function verifyReceipt(adapter, cmd, before, resumeName) {
+  async function verifyReceipt(adapter, cmd, before, expectedText) {
     for (let i = 0; i < 12; i++) {
       await sleep(400); workerGuard(cmd, true); adapter.assertIdentity(cmd.args.job);
       const history = adapter.history(cmd.args.job);
-      if (resumeName) {
-        const receipts = adapter.nodes(adapter.p.resumeReceipt).filter(n => (n.innerText || '').includes(resumeName));
-        if (receipts.length > before) return true;
-      } else if (history.some(m => (C.isAIOutgoing(m) || cmd.type === 'reply' && m.role === 'candidate' && typeof m.text === 'string' && m.text.trim()) && !before.includes(m.id))) return true;
+      if (history.some(m => !before.includes(m.id) && C.receiptMatches(m, expectedText))) return true;
     }
     return false;
   }
@@ -931,7 +928,7 @@
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id || !adapter.editorMatches(text)) throw new Error('等待发送期间会话或草稿发生变化，取消发送');
       const send = adapter.button(adapter.p.send);
       sendStage(cmd, 'clicked'); put('consumed.' + cmd.id, true); workerGuard(cmd, true); send.click();
-      const confirmed = await verifyReceipt(adapter, cmd, before);
+      const confirmed = await verifyReceipt(adapter, cmd, before, text);
       if (confirmed) sendStage(cmd, 'confirmed');
       workerFinish(cmd, { confirmed, reason: confirmed ? '' : '消息发送回执未确认' });
     } catch (e) {
