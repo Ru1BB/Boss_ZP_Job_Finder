@@ -1,6 +1,6 @@
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.39';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.40';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -363,14 +363,30 @@
     }
     return { ...answer, text: answer.action === 'reply' ? C.anonymousMessage(answer.text, c.resume, entry.job) : answer.text, inboundId: inbound.at(-1).id };
   }
+  async function guardedDelay(ms, guard) {
+    // Short chunks keep manual stop, the schedule, and execution ownership active.
+    guard();
+    for (let remaining = ms; remaining > 0;) {
+      const chunk = Math.min(500, remaining); await sleep(chunk); remaining -= chunk; guard();
+    }
+  }
   async function command(type, args, taskId, sendId = null) {
     if (!still(taskId)) throw new Error('任务已停止');
     const s = state();
     const old = get('activeWorker');
     if (old && !await closeManagedWorker(old.id, workerTabId === old.id ? workerTab : null)) throw new Error('上一个脚本工作页尚未关闭，已暂停，不再开新页；请关闭旧工作页后点击“清理残留工作页”');
     if (!still(taskId)) throw new Error('任务已停止');
+    if (type === 'inspect') {
+      logMessage = '打开职位前等待';
+      await guardedDelay(C.actionDelay(config(), 'beforeOpenSeconds'), () => { if (!still(taskId)) throw new Error('任务停止，已取消打开职位'); });
+    }
     const id = crypto.randomUUID(), wid = crypto.randomUUID();
     const cmd = { id, workerId: wid, type, args, taskId, sendId, owner, createdAt: Date.now(), phase: 'new' };
+    if (['contact', 'reply'].includes(type)) {
+      cmd.fillDelay = C.actionDelay(config(), 'beforeFillSeconds');
+      cmd.sendDelay = C.actionDelay(config(), 'beforeSendSeconds');
+    }
+    cmd.timeoutMs = 90000 + (cmd.fillDelay || 0) + (cmd.sendDelay || 0);
     if (sendId) put('sendStage.' + sendId, { stage: 'prepared', commandId: id, at: Date.now() });
     put('activeWorker', { id: wid, commandId: id, createdAt: Date.now() });
     put('command', cmd);
@@ -384,7 +400,7 @@
       handle = workerTab = GM_openInTab(url.href, { active: false, insert: true, setParent: true }); workerTabId = wid;
       if (!handle || typeof handle.close !== 'function') throw new Error('油猴未返回可关闭的工作页句柄');
       handle.onclose = () => put('workerClosed.' + wid, true);
-      const expires = Date.now() + 90000;
+      const expires = cmd.createdAt + cmd.timeoutMs;
       while (Date.now() < expires) {
         if (!still(taskId)) { put('cancel.' + id, true); throw new Error('任务停止，已取消页面操作'); }
         const result = get('result.' + id);
@@ -738,7 +754,7 @@
         s.entries[key] = { key, job, analysis: result, status, taskId, createdAt: Date.now(), ...(retryApproved ? { retryApproved: true, retryApprovedAt: previous.retryApprovedAt } : {}),
           note: filter.reason || (!job.recruiterId ? (job.identityDiagnostic?.status === 'conflicting' ? '招聘者身份信息互相冲突，请在职位详情页运行只读诊断' : '尚未识别招聘者：需要平台 ID，或唯一的公司与招聘者信息；请在职位详情页运行只读诊断') : status === 'review' ? '需人工核对' : '') };
       }
-      s.task.nextScanAt = Date.now() + C.randomDelay(c); s.task.refreshWanted = true;
+      s.task.nextScanAt = Date.now() + C.actionDelay(c, 'nextJobSeconds'); s.task.refreshWanted = true;
       log(s, `已读取职位：${job.title || job.jobId}；${s.entries[key].status}`); persist(s);
     } catch (e) {
       if (owned() && state().task?.id === taskId && state().task.status === 'running') {
@@ -779,7 +795,7 @@
     const s = state(), c = config(), active = get('command');
     if (get('cancel.' + cmd.id) || get('stopRequest') || !active || active.id !== cmd.id ||
       cmd.owner !== winner() || s.task?.leaseToken !== cmd.owner || s.task?.id !== cmd.taskId ||
-      !C.allowed(s, c, Date.now()) || Date.now() - cmd.createdAt > 90000 || !workerOwns()) throw new Error('工作指令过期或任务已停止');
+      !C.allowed(s, c, Date.now()) || Date.now() - cmd.createdAt > (cmd.timeoutMs || 90000) || !workerOwns()) throw new Error('工作指令过期或任务已停止');
     if (sending && (!c.autoSend || !s.outbox.some(x => x.id === cmd.sendId && x.status === 'pending' && x.taskId === cmd.taskId))) throw new Error('没有有效的发送预约');
     if (checkHealth) new Adapter(document, c.profile).health();
     return c;
@@ -812,7 +828,7 @@
     const current = get('command');
     if (get('closeWorker.' + workerId) || get('workerRetired.' + workerId) || !current || current.workerId !== workerId ||
       get('cancel.' + current.id) || get('stopRequest') || get('result.' + current.id) ||
-      !C.allowed(state(), config(), Date.now()) || Date.now() - current.createdAt > 90000) {
+      !C.allowed(state(), config(), Date.now()) || Date.now() - current.createdAt > (current.timeoutMs || 90000)) {
       closeWorkerSelf(); return;
     }
     if (workerBusy) return;
@@ -896,6 +912,10 @@
       const text = (cmd.type === 'contact' ? C.greetingMessage : C.anonymousMessage)(cmd.args.text, c.resume, job);
       if (!text || C.sensitive(text)) throw new Error('消息为空或涉及关键事项');
       const before = history.map(m => m.id);
+      workerPhase(cmd, 'waitingFill');
+      await guardedDelay(cmd.fillDelay || 0, () => workerGuard(cmd, true));
+      adapter.assertIdentity(job);
+      if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id) throw new Error('等待填入期间会话发生变化，取消旧消息');
       sendStage(cmd, 'drafting');
       adapter.fill(text); await sleep(150);
       // Allow a bounded UI render delay; never rewrite the draft or retry a send.
@@ -905,6 +925,10 @@
       workerGuard(cmd, true); adapter.assertIdentity(job);
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id) throw new Error('填写期间会话发生变化，草稿留待人工处理');
       if (!adapter.editorMatches(text)) throw new Error('输入框内容与拟发送消息不一致，取消发送（已等待编辑器同步，草稿保留；请核对换行或网页是否改写内容）');
+      workerPhase(cmd, 'waitingSend');
+      await guardedDelay(cmd.sendDelay || 0, () => workerGuard(cmd, true));
+      adapter.assertIdentity(job);
+      if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id || !adapter.editorMatches(text)) throw new Error('等待发送期间会话或草稿发生变化，取消发送');
       const send = adapter.button(adapter.p.send);
       sendStage(cmd, 'clicked'); put('consumed.' + cmd.id, true); workerGuard(cmd, true); send.click();
       const confirmed = await verifyReceipt(adapter, cmd, before);
@@ -964,7 +988,10 @@
       <p class="muted">自动读取页面左上角及“更多”中的类别，按页面顺序点选轮换，无需输入名称；末尾轮换回第一个。顶部和折叠菜单中的同名副本合并，优先点击可见入口。不清空已读和发送记录、不重置额度，不点击新增或编辑求职期望。切换未确认时刷新续跑；仍按所选城市和实习/全职类型搜索。</p>
       <div class="row"><div><label>开始时间</label><input type="time" name="startTime"></div><div><label>停止时间（可跨午夜）</label><input type="time" name="stopTime"></div></div>
       <div class="row"><div><label>每次任务最多首聊次数</label><input type="number" name="maxContacts" min="1" max="500"></div><div><label>所有发送动作最小间隔 / 秒</label><input type="number" name="sendIntervalSeconds" min="1"></div></div>
-      <div class="row"><div><label>随机刷新等待最小 / 秒</label><input type="number" name="refreshMinSeconds" min="1" max="3600"></div><div><label>随机刷新等待最大 / 秒</label><input type="number" name="refreshMaxSeconds" min="1" max="3600"></div></div>
+      <div class="row"><div><label>打开职位前等待 / 秒</label><input type="number" name="beforeOpenSeconds" min="0" max="3600"></div><div><label>核对后多久填入招呼 / 秒</label><input type="number" name="beforeFillSeconds" min="0" max="3600"></div></div>
+      <div class="row"><div><label>填入后多久点击发送 / 秒</label><input type="number" name="beforeSendSeconds" min="0" max="3600"></div><div><label>多久处理下一个岗位 / 秒</label><input type="number" name="nextJobSeconds" min="0" max="3600"></div></div>
+      <p class="muted">上述四项为基础等待，每次分别加上下面范围内独立抽取的随机秒数；默认基础等待0秒。共用随机范围也用于刷新与聊天扫描。填入及发送等待适用于文字招呼和回复；所有发送仍受最小发送间隔约束。等待中可立即停止，到停止时间取消；等待后重新核对会话和草稿。</p>
+      <div class="row"><div><label>共用随机延迟最小 / 秒</label><input type="number" name="refreshMinSeconds" min="1" max="3600"></div><div><label>共用随机延迟最大 / 秒</label><input type="number" name="refreshMaxSeconds" min="1" max="3600"></div></div>
       <label>AI 请求等待上限 / 秒</label><input type="number" name="aiTimeoutSeconds" min="30" max="600"><p class="muted">默认180秒，可设30–600秒；用于等待完整AI响应，与刷新及发送间隔独立。服务商端的超时不一定随此设置延长。超时按最多3次AI尝试处理，连续失败才暂停；不重试发送点击。</p>
       <p class="muted">默认每轮独立随机等待 10–60 秒；读取完一个职位后刷新搜索页。翻页和滚动也使用随机等待，不重复分析已读职位。AI/加载耗时另计，不保证精确刷新时刻。</p>
       <div class="row"><div><label>AI 匹配阈值 / 100</label><input type="number" name="threshold" min="0" max="100"></div><div><label>每个会话每任务最多自动回复</label><input type="number" name="maxReplies" min="1" max="100"></div></div></details>
@@ -1146,7 +1173,7 @@
     if (cmd?.taskId === s.task.id) {
       const labels = { inspect: '读取职位详情', history: '检查已联系会话', contact: '首聊流程', reply: '回复流程', resume: '附件流程', openOnly: '仅打开沟通' };
       const elapsed = Math.max(0, Math.floor((Date.now() - cmd.createdAt) / 1000));
-      const phases = { new: '载入工作页', detail: '载入详情', opening: '打开目标会话', chatList: '查找会话', selected: '等待会话展开', chat: '读取聊天' };
+      const phases = { new: '载入工作页', detail: '载入详情', opening: '打开目标会话', chatList: '查找会话', selected: '等待会话展开', chat: '读取聊天', waitingFill: '核对后等待填入', waitingSend: '填入后等待发送' };
       return (cmd.healthCheck ? '页面异常自动复查中 · ' : '') + `当前动作：${labels[cmd.type] || '页面操作'} · ${phases[cmd.phase] || cmd.phase} · 已等待${elapsed}秒 / 上限90秒` +
         (get('workerRegistered.' + cmd.workerId) ? '' : ' · 等待后台工作页加载并注册脚本');
     }

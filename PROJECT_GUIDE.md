@@ -192,3 +192,5 @@ BOSSZP/
 0.1.38：拒绝消息在调用AI前识别并关闭该会话自动回复；AI提示词补充拒绝语义兜底，保留其它会话运行。
 
 0.1.39：面板标题栏使用sticky定位，滚动时持续显示版本号与收起按钮。
+
+0.1.40：beforeOpenSeconds / beforeFillSeconds / beforeSendSeconds / nextJobSeconds 为0–3600秒基础等待，actionDelay统一加上refreshMinSeconds至refreshMaxSeconds随机延迟；发送最小间隔仍独立约束。等待可取消，工作指令时限按已抽取等待预算扩展。

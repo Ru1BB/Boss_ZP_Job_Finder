@@ -374,3 +374,16 @@ test('explicit recruiter rejections are recognized without matching quoted keywo
   for (const text of ['您的经验与我们当前项目的需求并不完全吻合。祝您找到更好的机会！', '抱歉，目前不考虑', '不太合适', '这个岗位已招满', '很遗憾，无法安排面试', '您的简历不符合岗位要求']) assert.equal(C.isRejection(text), true, text);
   for (const text of ['请介绍一下项目经验', '如果不合适你会怎么处理？', '我们不会拒绝没有实习经验的同学', '并非您的经验不符合要求', '不是不合适，还需要评估', '拒绝按钮是做什么的？']) assert.equal(C.isRejection(text), false, text);
 });
+
+
+test('all four action delays share the configured random range with an independent base', () => {
+  const c = { ...C.defaults(), refreshMinSeconds: 10, refreshMaxSeconds: 60,
+    beforeOpenSeconds: 2, beforeFillSeconds: 3, beforeSendSeconds: 4, nextJobSeconds: 5 };
+  for (const key of ['beforeOpenSeconds', 'beforeFillSeconds', 'beforeSendSeconds', 'nextJobSeconds']) {
+    assert.equal(C.actionDelay(c, key, () => 0), (c[key] + 10) * 1000);
+    assert.equal(C.actionDelay(c, key, () => .999), (c[key] + 60) * 1000);
+    assert.throws(() => C.validateConfig({ ...c, [key]: -1 }));
+    assert.throws(() => C.validateConfig({ ...c, [key]: 3601 }));
+  }
+  assert.equal(C.fixedConfig({}).beforeOpenSeconds, 0);
+});

@@ -16,7 +16,7 @@ function runtime(overrides = {}, shared = null, clockOffset = 0) {
     sessionStorage: { getItem() { return null; } },
     GM_getValue: (k, fallback = null) => store.has(k) ? structuredClone(store.get(k)) : fallback,
     GM_setValue: (k, v) => store.set(k, structuredClone(v)), GM_deleteValue: k => store.delete(k), GM_listValues: () => [...store.keys()],
-    setTimeout, clearTimeout, document: {}, console };
+    setTimeout: (fn, ms) => setTimeout(fn, ms === 500 ? 0 : ms), clearTimeout, document: {}, console };
   vm.runInNewContext(source, context);
   const api = context.module.exports;
   api.renewLease(); now += 2000; api.renewLease();
@@ -24,7 +24,7 @@ function runtime(overrides = {}, shared = null, clockOffset = 0) {
 }
 
 function quickRetryTimers(r) {
-  r.context.setTimeout = (fn, ms) => setTimeout(fn, ms === 1000 || ms === 2000 ? 0 : ms);
+  r.context.setTimeout = (fn, ms) => setTimeout(fn, ms === 500 || ms === 1000 || ms === 2000 ? 0 : ms);
 }
 
 test('debug report exposes only execution flags and a read-only DOM snapshot', () => {
@@ -887,7 +887,7 @@ test('clear during an in-flight AI request completes without waiting for pump cl
   let aiPending = false;
   r.context.GM_xmlhttpRequest = () => { aiPending = true; return { abort() {} }; };
   const pending = r.api.pump();
-  await new Promise(resolve => setImmediate(resolve));
+  for (let i = 0; i < 1000 && !aiPending; i++) await new Promise(resolve => setTimeout(resolve, 1));
   assert.equal(aiPending, true);
   r.api.requestClearActivity();
   // Still in the same call stack: the previous pump's finally has not run yet.
@@ -979,4 +979,14 @@ test('recruiter rejection stops that conversation before any AI request, ignorin
   const decision = await r.api.chatDecision(r.c, {}, [{ id: 'no1', role: 'recruiter', text: '您的经验与我们当前项目的需求并不完全吻合。', rich: false }]);
   assert.equal(decision.action, 'handoff'); assert.equal(decision.text, ''); assert.match(decision.reason, /已婉拒或拒绝/); assert.equal(calls, 0);
   assert.equal(await r.api.chatDecision(r.c, {}, [{ id: 'own1', role: 'candidate', text: '不合适', rich: false }]), null);
+});
+
+
+test('stopping during the before-open delay prevents opening a worker', async () => {
+  const r = runtime({ beforeOpenSeconds: 2, refreshMinSeconds: 1, refreshMaxSeconds: 1 }); r.api.start();
+  r.context.BossAdapter.Adapter.prototype.cards = () => [{ jobId: 'delay-job', url: 'https://www.zhipin.com/job_detail/delay-job.html' }];
+  let opened = false;
+  r.context.GM_openInTab = () => { opened = true; throw new Error('must not open'); };
+  r.context.setTimeout = fn => { r.api.stop('用户停止', true); queueMicrotask(fn); };
+  await r.api.pump(); assert.equal(opened, false); assert.equal(r.state().task.status, 'stopped');
 });

@@ -29,6 +29,7 @@
     greetingPrompt: '用自然、简短的中文打招呼，突出真实匹配点，不编造经历，不承诺薪资或面试。',
     threshold: 80, maxContacts: 50, sendIntervalSeconds: 180, aiTimeoutSeconds: 180,
     refreshMinSeconds: 10, refreshMaxSeconds: 60, maxReplies: 5,
+    beforeOpenSeconds: 0, beforeFillSeconds: 0, beforeSendSeconds: 0, nextJobSeconds: 0,
     scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false, verifyChatWindow: true,
     openRejected: true, verifiedEmptyContact: false,
     switchCategoryOnExhausted: true, debugMode: false,
@@ -80,6 +81,7 @@
     }
     for (const key of ['autoSend', 'verifyChatWindow', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact', 'switchCategoryOnExhausted', 'debugMode']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
     for (const [key, min, max] of [['threshold', 0, 100], ['maxContacts', 1, 500],
+      ['beforeOpenSeconds', 0, 3600], ['beforeFillSeconds', 0, 3600], ['beforeSendSeconds', 0, 3600], ['nextJobSeconds', 0, 3600],
       ['sendIntervalSeconds', 1, 86400], ['refreshMinSeconds', 1, 3600],
       ['refreshMaxSeconds', 1, 3600], ['maxReplies', 1, 100], ['aiTimeoutSeconds', 30, 600]]) {
       if (!Number.isInteger(c[key]) || c[key] < min || c[key] > max) fail(`配置 ${key} 必须是 ${min}–${max} 的整数`);
@@ -134,6 +136,9 @@
   }
   function randomDelay(c, rng = Math.random) {
     return (c.refreshMinSeconds + Math.floor(rng() * (c.refreshMaxSeconds - c.refreshMinSeconds + 1))) * 1000;
+  }
+  function actionDelay(c, key, rng = Math.random) {
+    return (c[key] || 0) * 1000 + randomDelay(c, rng);
   }
   function parseJSON(s) {
     if (typeof s !== 'string' || s.length > 50000) fail('AI 返回内容无效');
@@ -295,6 +300,6 @@
     }
     return compacted;
   }
-  return { AI_NOTICE, PROJECT_INTRO, PROJECT_URL, aiMessage, anonymousMessage, greetingMessage, isAIOutgoing, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, parseJSON, analysis, reply, pair,
+  return { AI_NOTICE, PROJECT_INTRO, PROJECT_URL, aiMessage, anonymousMessage, greetingMessage, isAIOutgoing, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, actionDelay, parseJSON, analysis, reply, pair,
     sensitive, wantsResume, isRejection, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner, temporaryFailure, runtimeStats, compactHistory, employmentUrl };
 });

@@ -10,7 +10,7 @@ async function run(options = {}) {
   const c = { ...C.defaults(), autoSend: true, verifiedEmptyContact: !!options.verifiedEmptyContact, verifyChatWindow: options.verifyChatWindow !== false, resumeName: '测试简历.pdf', profile: { verifiedContact: true, firstContactOpensEmptyChat: true, verifiedReply: true, verifiedResume: true } };
   const s = C.emptyState(); s.task = C.createTask(c, now); s.task.leaseToken = 'leader';
   const cmd = { id: 'cmd', workerId: 'worker', taskId: s.task.id, sendId: 'send', owner: 'leader', createdAt: now,
-    type: options.type || 'contact', phase: options.phase || 'chat', args: { job, text: '您好，我有相关项目经验', historyTail: 'in1', inboundId: 'in1', resumeName: c.resumeName } };
+    fillDelay: options.fillDelay || 0, sendDelay: options.sendDelay || 0, type: options.type || 'contact', phase: options.phase || 'chat', args: { job, text: '您好，我有相关项目经验', historyTail: 'in1', inboundId: 'in1', resumeName: c.resumeName } };
   s.outbox.push({ id: 'send', status: 'pending', taskId: s.task.id });
   if (options.retryApproved) { cmd.args.retryApproved = true; s.entries[C.pair(job)] = { job, retryApproved: true }; }
   const history = options.history || (cmd.type === 'contact' ? [] : [{ id: 'in1', role: 'recruiter', text: '请发一份简历', rich: false }]);
@@ -65,7 +65,7 @@ async function run(options = {}) {
     document: { createElement: () => ({ style: {} }), documentElement: { append() {} } },
     GM_getValue: (k, fallback = null) => store.has(k) ? structuredClone(store.get(k)) : fallback,
     GM_setValue: (k, v) => store.set(k, structuredClone(v)), GM_listValues: () => [...store.keys()], GM_deleteValue: k => store.delete(k),
-    setInterval: f => callbacks.push(f), setTimeout: f => { f(); }, Event: class {},
+    setInterval: f => callbacks.push(f), setTimeout: (f, ms) => { if (ms === 500 && options.stopDuringDelay) store.set('bossai.v1.stopRequest', { manual: true }); f(); }, Event: class {},
     window: { close() { events.push('closeWorker'); if (options.closeThrows) throw new Error('close failed'); } },
     GM_getTab: callback => callback({}), GM_saveTab(tab, callback) { callback?.(); },
     GM_registerMenuCommand() {}, GM_openInTab() {}, addEventListener() {} };
@@ -237,4 +237,14 @@ test('attachment mismatch and no explicit request never send files', async () =>
   for (const opts of [{ ambiguousResume: true }, { history: [{ id: 'in1', role: 'recruiter', text: '不用发简历', rich: false }] }]) {
     const { events, result } = await run({ type: 'resume', ...opts }); assert.equal(result.ok, false); assert.equal(events.includes('resumeSend'), false);
   }
+});
+
+
+test('configurable delays still allow one send but stop prevents filling or clicking', async () => {
+  const normal = await run({ fillDelay: 1000, sendDelay: 1000 });
+  assert.equal(normal.result.ok, true); assert.equal(normal.events.filter(e => e === 'send').length, 1);
+  const beforeFill = await run({ fillDelay: 1000, stopDuringDelay: true });
+  assert.equal(beforeFill.events.includes('fill'), false); assert.equal(beforeFill.events.includes('send'), false);
+  const beforeSend = await run({ sendDelay: 1000, stopDuringDelay: true });
+  assert.equal(beforeSend.events.includes('fill'), true); assert.equal(beforeSend.events.includes('send'), false);
 });
