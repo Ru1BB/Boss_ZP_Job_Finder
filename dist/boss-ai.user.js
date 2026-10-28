@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS AI 求职助手（试运行优先）
 // @namespace    local.boss-ai
-// @version      0.1.33
+// @version      0.1.38
 // @updateURL    https://7355608.site/userscripts/boss-ai.meta.js
 // @downloadURL  https://7355608.site/userscripts/boss-ai.user.js
 // @description  AI 职位筛选、受控沟通与北京时间调度；请先校准页面
@@ -378,7 +378,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     refreshMinSeconds: 10, refreshMaxSeconds: 60, maxReplies: 5,
     scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false, verifyChatWindow: true,
     openRejected: true, verifiedEmptyContact: false,
-    switchCategoryOnExhausted: true,
+    switchCategoryOnExhausted: true, debugMode: false,
     resumeName: '', internshipOnly: true, requiredCity: '北京', profile: {}
   });
   const fail = message => { throw new Error(message); };
@@ -425,7 +425,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     for (const key of ['baseUrl', 'model', 'apiKey', 'resume', 'preferences', 'screeningPrompt', 'greetingPrompt', 'resumeName', 'requiredCity']) {
       if (typeof c[key] !== 'string') fail(`配置 ${key} 必须是文字`);
     }
-    for (const key of ['autoSend', 'verifyChatWindow', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact', 'switchCategoryOnExhausted']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
+    for (const key of ['autoSend', 'verifyChatWindow', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact', 'switchCategoryOnExhausted', 'debugMode']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
     for (const [key, min, max] of [['threshold', 0, 100], ['maxContacts', 1, 500],
       ['sendIntervalSeconds', 1, 86400], ['refreshMinSeconds', 1, 3600],
       ['refreshMaxSeconds', 1, 3600], ['maxReplies', 1, 100], ['aiTimeoutSeconds', 30, 600]]) {
@@ -548,6 +548,13 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     return JSON.stringify([String(job.recruiterId), String(job.jobId)]);
   }
   const sensitive = text => /面试|约面|几点|周[一二三四五六日天]|明天|后天|到岗|入职|薪资|工资|待遇|底薪|期望薪|报价|微信|手机号|电话|邮箱|身份证|银行卡|转账|付款|验证码|下载|安装|点击链接|加.{0,3}(微|v|V)/i.test(text);
+  function isRejection(text) {
+    // Match complete rejection phrases, not isolated words such as “拒绝”.
+    return String(text || '').split(/[。！？!?；;\n]+/).some(part => {
+      if (/如果|假如|万一|是否|并非|不是说|不是不|并不是|不代表|不意味着|不会拒绝|不拒绝|不予拒绝/.test(part)) return false;
+      return /(?:您的?|你的?)(?:背景|经验|经历|技能|条件|简历|专业|能力).{0,40}(?:不(?:太|完全)?(?:符合|匹配|吻合|适合)|尚不符合|未(?:能)?达到)|(?:您|你|同学).{0,12}(?:不太适合|不符合.{0,12}要求)|(?:岗位|职位|需求|要求).{0,20}(?:与您|与你|和您|和你).{0,15}不(?:太)?匹配|(?:暂时|目前|暂).{0,6}不(?:予)?考虑|(?:暂时|目前|暂).{0,6}不(?:再)?推进|不(?:太)?合适|未通过.{0,10}(?:筛选|面试|评估)|(?:岗位|职位).{0,10}(?:已招满|已经招满|已关闭|已经关闭|暂停招聘)|(?:祝您|祝你).{0,20}(?:找到|找到更|求职顺利)|(?:很遗憾|抱歉).{0,20}(?:无法|不能).{0,12}(?:录用|安排面试|继续推进)/.test(part);
+    });
+  }
   const wantsResume = text => !/不用|不必|不需要|不要|别发|无需|已(?:经)?收到|收到了|不方便|暂不|不用再/.test(text) && /(?:请|麻烦|方便|能|可以|能否|能不能).{0,12}(?:发|给|传|提供).{0,12}简历|(?:发|传|给).{0,8}(?:一份|一下|份|个|下).{0,8}简历|简历.{0,12}(?:发我|发来|发一下|给我|方便发)|resume\s*please/i.test(text);
   function decide(a, config) { return a.score >= config.threshold ? 'eligible' : 'rejected'; }
   function allowed(state, c, now) {
@@ -636,7 +643,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     return compacted;
   }
   return { AI_NOTICE, PROJECT_INTRO, PROJECT_URL, aiMessage, anonymousMessage, greetingMessage, isAIOutgoing, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, parseJSON, analysis, reply, pair,
-    sensitive, wantsResume, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner, temporaryFailure, runtimeStats, compactHistory, employmentUrl };
+    sensitive, wantsResume, isRejection, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner, temporaryFailure, runtimeStats, compactHistory, employmentUrl };
 });
 
 /* DOM only. No private BOSS API calls; selectors are versioned user configuration. */
@@ -692,7 +699,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     }
     nodes(selector, scope = this.doc) {
       if (!selector) return [];
-      try { return [...scope.querySelectorAll(selector)].filter(n => n.getClientRects().length && !n.closest('#boss-ai-host')); }
+      try { return [...scope.querySelectorAll(selector)].filter(n => n.getClientRects().length && !n.closest('#boss-ai-host, #boss-ai-debug-host')); }
       catch { throw new Error('页面选择器无效，请检查高级适配配置'); }
     }
     one(selector, scope = this.doc, optional = false) {
@@ -886,7 +893,23 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       if (actual.jobId === job.jobId) return;
       throw new Error('当前会话与目标岗位不一致，已停止');
     }
+    isAvatarImage(media, row) {
+      // Observed avatar slot: message row > .message-content > .figure:first-child
+      // > img.image-circle. Rounded images inside message bodies stay rich content.
+      if (media.tagName !== 'IMG' || !media.matches?.('img.image-circle')) return false;
+      const figure = media.parentElement, content = figure?.parentElement;
+      return !!(figure?.matches?.('.figure') && content?.matches?.('.message-content') &&
+        content.parentElement === row && content.firstElementChild === figure);
+    }
+    richNodes(row) { return this.nodes(this.p.richMessage, row).filter(media => !this.isAvatarImage(media, row)); }
     isSystemNotice(n) {
+      // Only the observed platform attachment receipt is ignored, never arbitrary
+      // unknown-direction messages or recruiter text quoting a receipt.
+      if (n.matches('.message-item.item-system') && !n.matches(this.p.messageIncoming) && !n.matches(this.p.messageOutgoing)) {
+        const receipt = this.text('.hyper-link.text', n).replace(/\s/g, '');
+        if (/^您的附件简历.+已发送给Boss点击查看附件$/.test(receipt) &&
+            receipt === String(n.innerText || n.textContent || '').replace(/\s/g, '') && !this.richNodes(n).length) return true;
+      }
       // This allowlist identifies the platform's competitor-analysis promotion,
       // not arbitrary blue cards or messages that merely quote its title.
       if (!n.matches(this.p.messageIncoming) || n.matches(this.p.messageOutgoing)) return false;
@@ -896,7 +919,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       if (titles.length !== 1 || buttons.length !== 1) return false;
       const title = this.normalizeField(titles[0].innerText || titles[0].textContent).replace(/\s/g, '');
       if (!/^(?:你|您)与该职位竞争者PK情况$/i.test(title) || this.normalizeField(buttons[0].innerText || buttons[0].textContent) !== '查看详细分析') return false;
-      if (this.text(this.p.messageText, n) || this.nodes(this.p.richMessage, n).some(media => !card.contains(media))) return false;
+      if (this.text(this.p.messageText, n) || this.richNodes(n).some(media => !card.contains(media))) return false;
       // Preserve any real text attached outside the card. Only the row's time
       // label may coexist with this known system notice.
       const cardText = this.normalizeField(card.innerText || card.textContent);
@@ -913,10 +936,10 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
         if (!id || seen.has(id)) throw new Error('消息缺少唯一 ID 或 ID 重复');
         seen.add(id);
         const incoming = n.matches(this.p.messageIncoming), outgoing = n.matches(this.p.messageOutgoing);
-        if (incoming === outgoing) throw new Error('无法判别消息方向，已停止该会话');
         if (this.isSystemNotice(n)) return [];
+        if (incoming === outgoing) throw new Error('无法判别消息方向，已停止该会话');
         return [{ id, role: incoming ? 'recruiter' : 'candidate', text: this.text(this.p.messageText, n).slice(0, 6000),
-          rich: this.nodes(this.p.richMessage, n).length > 0 }];
+          rich: this.richNodes(n).length > 0 }];
       });
     }
     selectConversation(job) {
@@ -1006,6 +1029,107 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
         chat,
         warning: '诊断只读取页面，不证明立即沟通是否自动发送招呼。verified 标记必须在人工验证流程后设置。' };
     }
+    debugSnapshot(options = {}) {
+      const includeMessageText = options.includeMessageText === true;
+      const errors = [];
+      const safe = (name, fn, fallback) => { try { return fn(); } catch { errors.push(name); return fallback; } };
+      const nodes = (name, selector) => safe(name, () => this.nodes(selector), []);
+      const classes = node => String(typeof node.className === 'string' ? node.className : '').split(/\s+/)
+        .filter(x => /^[A-Za-z_][\w-]{0,79}$/.test(x)).slice(0, 6);
+      const selectorPart = node => {
+        const tag = /^[a-z][\w-]*$/i.test(node.tagName || '') ? node.tagName.toLowerCase() : 'element';
+        const siblings = [...(node.parentElement?.children || [])].filter(n => n.tagName === node.tagName);
+        return tag + classes(node).map(c => '.' + c).join('') + (siblings.length > 1 ? ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')' : '');
+      };
+      const describe = node => {
+        const ancestors = []; let current = node;
+        for (let i = 0; current && i < 5; i++, current = current.parentElement) ancestors.unshift(selectorPart(current));
+        const rect = node.getBoundingClientRect?.();
+        return { tag: node.tagName || '', classes: classes(node), hasId: !!node.id,
+          selectorHint: ancestors.join(' > '),
+          attributes: [...(node.attributes || [])].map(a => a.name).filter(n => /^(?:id|class|role|type|contenteditable|disabled|aria-|data-)/.test(n) && !n.startsWith('data-v-')).slice(0, 25),
+          editable: !!node.isContentEditable, visible: this.healthVisible(node), disabled: !!node.disabled || node.getAttribute?.('aria-disabled') === 'true' ||
+            !!node.classList?.contains('disabled') || String(typeof node.className === 'string' ? node.className : '').split(/\s+/).includes('disabled'),
+          inViewport: rect ? rect.width > 0 && rect.height > 0 && (rect.x || 0) + rect.width > 0 && (rect.y || 0) + rect.height > 0 &&
+            (rect.x || 0) < (this.doc.defaultView?.innerWidth ?? Infinity) && (rect.y || 0) < (this.doc.defaultView?.innerHeight ?? Infinity) : null,
+          box: rect ? { x: Math.round(rect.x || 0), y: Math.round(rect.y || 0), width: Math.round(rect.width || 0), height: Math.round(rect.height || 0) } : null };
+      };
+      const capture = (name, selector, max = 8) => nodes(name, selector).slice(0, max).map(describe);
+      const sendCandidates = nodes('sendCandidates', 'button, [role="button"], a, span')
+        .filter(n => /^发送$/.test((n.innerText || n.textContent || '').trim())).slice(0, 8).map(describe);
+      const candidates = {
+        chatContainers: capture('chatContainers', this.p.chatHeader),
+        chatPositions: capture('chatPositions', '.chat-position-content, .chat-position-content .position-content'),
+        editors: capture('editors', '[contenteditable="true"], textarea, [role="textbox"]'),
+        configuredEditor: capture('configuredEditor', this.p.composer),
+        configuredSend: capture('configuredSend', this.p.send), sendCandidates,
+        conversationRows: capture('conversationRows', this.p.conversationRow, 5),
+        recentMessageRows: nodes('recentMessageRows', this.p.messages).slice(-5).map(describe),
+        frames: capture('frames', 'iframe', 5)
+      };
+      const messageNodes = nodes('messageRows', this.p.messages);
+      const ids = messageNodes.map((node, i) => safe('messageId.' + i, () => node.getAttribute(this.p.messageIdAttr) ||
+        (this.p.messageIdAttr === 'data-mid' ? node.getAttribute('data-message-id') : null), null));
+      const idCounts = new Map(); for (const id of ids) if (id) idCounts.set(id, (idCounts.get(id) || 0) + 1);
+      const offset = Math.max(0, messageNodes.length - 20);
+      const rowDetails = messageNodes.slice(-20).map((node, i) => {
+        const index = offset + i, label = 'message.' + index;
+        const incoming = safe(label + '.incoming', () => node.matches(this.p.messageIncoming), null);
+        const outgoing = safe(label + '.outgoing', () => node.matches(this.p.messageOutgoing), null);
+        const directionKnown = typeof incoming === 'boolean' && typeof outgoing === 'boolean' && incoming !== outgoing;
+        const textNodes = safe(label + '.textNodes', () => this.nodes(this.p.messageText, node), []);
+        const text = safe(label + '.text', () => this.text(this.p.messageText, node), '');
+        const rowText = String(node.innerText || node.textContent || '').trim();
+        const matchedRich = safe(label + '.rich', () => this.nodes(this.p.richMessage, node), []);
+        const ignoredAvatars = matchedRich.filter(media => this.isAvatarImage(media, node));
+        const rich = matchedRich.filter(media => !this.isAvatarImage(media, node));
+        const systemCard = safe(label + '.systemCard', () => this.isSystemNotice(node), false);
+        const duplicateId = !!ids[index] && idCounts.get(ids[index]) > 1;
+        const issues = [];
+        if (!ids[index]) issues.push('missing-message-id');
+        if (duplicateId) issues.push('duplicate-message-id');
+        if (!directionKnown && !systemCard) issues.push('unknown-or-conflicting-direction');
+        if (!systemCard && !text.trim()) issues.push(rowText ? 'row-has-content-but-no-parsed-text' : 'no-parsed-text');
+        if (!systemCard && rich.length) issues.push('rich-content');
+        const children = safe(label + '.structure', () => this.nodes('[class], p, span', node), []);
+        const result = { row: index + 1, ...describe(node), hasMessageId: !!ids[index], duplicateId,
+          direction: directionKnown ? incoming ? 'recruiter' : 'candidate' : 'unknown',
+          textMatchCount: textNodes.length, textLength: text.length, parsedTextLength: Math.min(6000, text.length),
+          rowTextLength: rowText.length, richCount: rich.length, ignoredSystemCard: systemCard,
+          matchedRichCount: matchedRich.length, ignoredAvatarCount: ignoredAvatars.length,
+          textStructure: textNodes.slice(0, 6).map(n => ({ ...describe(n), textLength: String(n.innerText || n.textContent || '').trim().length })),
+          richStructure: rich.slice(0, 8).map(describe),
+          ignoredAvatarStructure: ignoredAvatars.slice(0, 4).map(describe),
+          historyRowShapeValid: !!ids[index] && !duplicateId && (directionKnown || systemCard),
+          contentKind: systemCard ? 'ignored-system-card' : rich.length ? 'rich-content' : text.trim() ? 'text' : rowText ? 'card-or-unmatched-text' : 'empty',
+          issues, childStructure: children.slice(0, 30).map(child => ({ tag: child.tagName || '', classes: classes(child),
+            textLength: String(child.innerText || child.textContent || '').trim().length })),
+          structureTruncated: children.length > 30 };
+        if (includeMessageText) {
+          result.parsedTextPreview = text.slice(0, 500); result.rowTextPreview = rowText.slice(0, 500);
+          result.previewTruncated = text.length > 500 || rowText.length > 500;
+        }
+        return result;
+      });
+      const diagnosis = [];
+      if (!messageNodes.length) diagnosis.push('未找到消息行：先展开目标会话，再核对messages选择器');
+      if (rowDetails.some(row => row.issues.includes('missing-message-id') || row.duplicateId)) diagnosis.push('存在缺失或重复消息ID，会阻止正常读取聊天历史');
+      if (rowDetails.some(row => row.direction === 'unknown' && !row.ignoredSystemCard)) diagnosis.push('部分消息无法区分收发方向，需要核对消息方向选择器');
+      if (rowDetails.some(row => row.contentKind === 'card-or-unmatched-text')) diagnosis.push('消息行有内容，但正文选择器没有读到文字；查看对应childStructure定位正文或卡片');
+      if (rowDetails.some(row => row.contentKind === 'rich-content')) diagnosis.push('存在图片/文件等非纯文本内容，需结合卡片结构判断，不能当作纯文字自动回复');
+      if (rowDetails.length && rowDetails.every(row => row.historyRowShapeValid && (row.ignoredSystemCard || row.textLength > 0 && row.richCount === 0))) diagnosis.push('已采样消息的ID、方向和纯文字正文形状可读取；不代表发送流程已验证');
+      const original = safe('basicDiagnostic', () => this.diagnostic(), { unavailable: true });
+      const basic = { counts: original.counts || {}, messageSummary: original.messageSummary || null,
+        job: original.job || null, unavailable: !!original.unavailable,
+        identityStatus: original.identity === '岗位 ID 可核对' ? 'job-id-readable' : /岗位名称可读取/.test(original.identity || '') ? 'job-title-readable' :
+          /尚未选中/.test(original.identity || '') ? 'no-selected-conversation' : 'missing-or-ambiguous' };
+      return { page: this.doc.location.pathname,
+        health: safe('health', () => this.healthIssue()?.kind || 'normal', 'unknown'),
+        basic, candidates, messages: { totalMatchedRows: messageNodes.length, inspectedRows: rowDetails.length,
+          olderRowsOmitted: offset, contentIncluded: includeMessageText, rowDetails }, diagnosis, errors,
+        notice: includeMessageText ? '本次已勾选包含最近20条消息正文，每段最多500字，可能含招聘者信息或联系方式；分享前核对。仍不读取草稿、身份属性值或插件配置中的简历与Key，不提交AI、不发送消息。' :
+          '只读诊断：默认只记录结构、方向、ID是否存在和文字长度，不包含正文、草稿、完整URL、身份属性值、简历或Key。selectorHint仅为结构线索，不提交AI、不发送消息。' };
+    }
     categoryName(node) {
       const values = [node.getAttribute('title'), node.getAttribute('aria-label'),
         node.textContent, node.innerText].map(value => this.normalizeField(value)).filter(Boolean);
@@ -1091,7 +1215,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
 
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.33';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.38';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -1439,11 +1563,13 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     const lastOutgoing = history.findLastIndex(m => m.role === 'candidate');
     const inbound = history.slice(lastOutgoing + 1).filter(m => m.role === 'recruiter');
     if (!inbound.length || inbound.at(-1).id === entry.lastInbound) return null;
+    if (inbound.some(m => C.isRejection(m.text))) return { action: 'handoff', text: '', evidence: [], reason: '对方已婉拒或拒绝，已停止该会话自动回复', inboundId: inbound.at(-1).id };
     if (inbound.some(m => m.rich || !m.text) || inbound.some(m => C.sensitive(m.text))) return { action: 'handoff', text: '', evidence: [], reason: '涉及关键事项或非文本内容，请人工处理', inboundId: inbound.at(-1).id };
     const requestText = inbound.map(m => m.text).join('\n');
-    if (C.wantsResume(requestText)) return { action: 'resume', text: '', evidence: [], reason: '对方明确索要简历', inboundId: inbound.at(-1).id };
-    const answer = C.reply(await requestAI(c, systemBase + '只回答简历明确支持的常规经历、技能和求职偏好问题。涉及约面、到岗、日期、薪资协商、联系方式、承诺或信息不足必须转人工。返回 {"action":"reply或handoff","text":"回复或空字符串","reason":"理由","evidence":["简历或偏好中的逐字证据"]}。不要主动索要或提供联系方式。',
+    if (C.wantsResume(requestText)) return { action: 'handoff', text: '', evidence: [], reason: '对方索要简历，请手动处理；脚本仅自动回复文字', inboundId: inbound.at(-1).id };
+    const answer = C.reply(await requestAI(c, systemBase + '对方婉拒、拒绝、不合适或岗位关闭时必须返回handoff且text为空，不发送致谢或挽留。只回答简历明确支持的常规经历、技能和求职偏好问题。涉及约面、到岗、日期、薪资协商、联系方式、承诺或信息不足必须转人工。返回 {"action":"reply或handoff","text":"回复或空字符串","reason":"理由","evidence":["简历或偏好中的逐字证据"]}。不要主动索要或提供联系方式。',
       { resume: c.resume, preferences: c.preferences, job: jobForAI(entry.job), history: history.slice(-25) }, '聊天回复'));
+    if (answer.action === 'resume') return { action: 'handoff', text: '', evidence: [], reason: '附件自动发送已停用，请手动处理', inboundId: inbound.at(-1).id };
     if (answer.action !== 'handoff' && C.sensitive(answer.text)) {
       return { action: 'handoff', text: '', evidence: [], reason: '回复缺少可验证依据或涉及关键事项', inboundId: inbound.at(-1).id };
     }
@@ -1516,10 +1642,10 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     log(s, item.kind === 'contact' ? '已确认首条招呼发送' : item.kind === 'resume' ? '已确认附件简历发送' : '已确认回复发送');
   }
   async function dispatchEntry(entry, kind, payload, taskId) {
+    if (kind === 'resume') throw new Error('附件自动发送已停用，请手动处理');
     if (kind === 'contact' || kind === 'reply') payload = { ...payload, text: (kind === 'contact' ? C.greetingMessage : C.anonymousMessage)(payload.text, config().resume, entry.job) };
     const c = config(), s = state();
     if (!still(taskId) || !C.canSend(s, c, Date.now(), kind, s.entries[entry.key])) return false;
-    if (kind === 'resume' && (!c.profile.verifiedResume || !c.resumeName.trim())) throw new Error('尚未校准附件发送或未指定简历，已暂停');
     const item = C.reserve(s, c, Date.now(), kind, s.entries[entry.key], payload);
     delete s.entries[entry.key].pendingReply; persist(s);
     const data = await command(kind, { job: entry.job, retryApproved: !!entry.retryApproved, ...payload }, taskId, item.id);
@@ -1911,6 +2037,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     if (!cmd || cmd.workerId !== workerId || get('result.' + cmd.id)) return;
     workerBusy = true;
     try {
+      if (cmd.type === 'resume') throw new Error('附件自动发送已停用，请手动处理');
       const sending = ['contact', 'reply', 'resume', 'openOnly'].includes(cmd.type), c = workerGuard(cmd, sending);
       if (cmd.healthCheck) { delete cmd.healthCheck; put('command', cmd); }
       const adapter = new Adapter(document, c.profile, Object.values(state().entries).map(entry => entry.job), { verifyChatWindow: c.verifyChatWindow }), job = cmd.args.job;
@@ -1980,23 +2107,6 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       }
       if (cmd.type !== 'contact') {
         if (history.at(-1)?.id !== cmd.args.historyTail || history.at(-1)?.role !== 'recruiter' || history.at(-1)?.id !== cmd.args.inboundId) throw new Error('会话有新消息或人工回复，取消旧回复');
-      }
-      if (cmd.type === 'resume') {
-        if (!c.profile.verifiedResume || !cmd.args.resumeName || !C.wantsResume(history.at(-1).text)) throw new Error('附件流程未验证或对方没有明确索要');
-        workerGuard(cmd, true); adapter.button(adapter.p.resumeOpen).click(); await sleep(600);
-        workerGuard(cmd, true); adapter.assertIdentity(job);
-        const dialog = adapter.one(adapter.p.resumeDialog);
-        const matches = adapter.nodes(adapter.p.resumeItem, dialog).filter(n => adapter.text(adapter.p.resumeName, n) === cmd.args.resumeName);
-        if (matches.length !== 1) throw new Error('无法唯一识别指定简历');
-        // The profile must have been tested: selecting an item must NOT send it immediately.
-        matches[0].click(); await sleep(300); workerGuard(cmd, true); adapter.assertIdentity(job);
-        if (adapter.history(job).at(-1)?.id !== cmd.args.historyTail) throw new Error('选择附件期间会话发生变化，取消发送');
-        const send = adapter.button(adapter.p.resumeSend, adapter.one(adapter.p.resumeDialog));
-        const before = adapter.nodes(adapter.p.resumeReceipt).filter(n => (n.innerText || '').includes(cmd.args.resumeName)).length;
-        sendStage(cmd, 'clicked'); put('consumed.' + cmd.id, true); workerGuard(cmd, true); send.click();
-        const confirmed = await verifyReceipt(adapter, cmd, before, cmd.args.resumeName);
-        if (confirmed) sendStage(cmd, 'confirmed');
-        workerFinish(cmd, { confirmed, reason: confirmed ? '' : '附件发送回执未确认' }); return;
       }
       const text = (cmd.type === 'contact' ? C.greetingMessage : C.anonymousMessage)(cmd.args.text, c.resume, job);
       if (!text || C.sensitive(text)) throw new Error('消息为空或涉及关键事项');
@@ -2074,15 +2184,16 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       <p class="muted">默认每轮独立随机等待 10–60 秒；读取完一个职位后刷新搜索页。翻页和滚动也使用随机等待，不重复分析已读职位。AI/加载耗时另计，不保证精确刷新时刻。</p>
       <div class="row"><div><label>AI 匹配阈值 / 100</label><input type="number" name="threshold" min="0" max="100"></div><div><label>每个会话每任务最多自动回复</label><input type="number" name="maxReplies" min="1" max="100"></div></div></details>
       <p class="muted">BOSS按所选实习/全职类型筛选，职位符合城市条件且分数达到阈值即可进入发送队列。AI 的“适合/不确定”标记和疑点仅供参考；实际发送仍需授权、对象核对，并遵守间隔和额度。</p>
-      <details><summary>AI 提示词与附件</summary><p class="muted">评分标准：${C.SCORING.map(x => x.label + ' ' + x.max + '分').join('；')}。AI 给各项分数，代码加总。“优先/加分项”仅影响最后10分，不重复扣分；岗位没有加分条款时此项按10分中性计入。</p><label>筛选要求</label><textarea name="screeningPrompt"></textarea><label>招呼语要求</label><textarea name="greetingPrompt"></textarea><p class="muted">首条招呼包含插件项目介绍与 GitHub 地址；消息末尾不再追加独立的 AI 发送提醒。</p><label>BOSS 附件简历完整名称</label><input name="resumeName" placeholder="必须与 BOSS 上显示的名称完全一致"></details>
+      <details><summary>AI 提示词与附件</summary><p class="muted">评分标准：${C.SCORING.map(x => x.label + ' ' + x.max + '分').join('；')}。AI 给各项分数，代码加总。“优先/加分项”仅影响最后10分，不重复扣分；岗位没有加分条款时此项按10分中性计入。</p><label>筛选要求</label><textarea name="screeningPrompt"></textarea><label>招呼语要求</label><textarea name="greetingPrompt"></textarea><p class="muted">首条招呼包含插件项目介绍与 GitHub 地址；消息末尾不再追加独立的 AI 发送提醒。</p><p class="muted">聊天仅自动发送文字；索要简历、卡片和附件操作交由人工处理，不自动点击或发送。</p><input name="resumeName" type="hidden"></details>
       <details><summary>页面诊断与高级适配</summary><p class="muted">开启聊天窗口核对时，有岗位 ID 则核对 ID；没有 ID 时仅核对岗位名称，不核对薪资、城市、招聘者或公司。关闭核对时跳过这项比对，但仍要求聊天窗口和输入框可用。“竞争者PK情况”系统卡片不计入聊天消息；其它已有消息仍阻止追加首条招呼。附件选择仍需校准，不要凭猜测开启 verified 标记。</p><button type="button" id="diagnostic">只读诊断当前页面</button><button type="button" id="defaultProfile">载入默认适配模板</button><pre id="diagnosticOutput"></pre><label>页面适配 JSON（仅 CSS 选择器和流程验证标记）</label><textarea name="profile" rows="8" spellcheck="false"></textarea></details>
+      <label><input type="checkbox" name="debugMode"> 调试模式：显示一键页面诊断工具</label><p class="muted">保存后在左下角显示“获取聊天页面信息”，可复制或下载脱敏结构报告。建议先停止任务，再手动打开目标会话采集；调试开关不改变自动发送权限，也不跳过历史去重或发送回执检查。</p>
       <label class="warn"><input type="checkbox" name="autoSend"> 允许 AI 自动发送（默认关闭）</label>
       <label><input type="checkbox" name="openRejected"> 不匹配岗位也仅打开沟通，不填写或发送 AI 消息</label>
       <label class="warn"><input type="checkbox" name="verifiedEmptyContact"> 我已实测确认当前 BOSS 设置点击“立即沟通”不会自动代发默认招呼</label>
       <p class="muted">上述两项及自动发送权限均开启后生效。每个岗位只尝试一次，不计首聊额度，不等待或更新统一发送间隔；仍按随机扫描节奏串行处理。若平台会自动发招呼，请勿勾选确认。搜索耗尽会按随机刷新间隔刷新续跑，不重置任务计数及去重；不保证平台会从搜索结果移除岗位。</p>
       <label class="warn"><input type="checkbox" name="verifyChatWindow"> 核对聊天窗口（默认开启）</label>
       <p class="warn">关闭后不比对当前聊天的岗位 ID 或名称，直接使用已打开的聊天窗口，可能发错对象。仍需会话已展开、输入框可用，并保留聊天历史去重、内容校验、发送间隔和额度。先停止任务，调整后保存配置。</p>
-      <p class="muted">关闭：只读取和分析，不向招聘者发送。取消勾选立即生效，取消排队发送；已发内容不能撤回。开启：先停止任务，勾选并保存配置；发送前是否比对聊天岗位由“核对聊天窗口”选项决定。附件还需单独校准。权限适用于首聊、回复和简历。</p>
+      <p class="muted">关闭：只读取和分析，不向招聘者发送。取消勾选立即生效，取消排队发送；已发内容不能撤回。开启：先停止任务，勾选并保存配置；发送前是否比对聊天岗位由“核对聊天窗口”选项决定。权限仅适用于文字首聊和文字回复；附件及卡片由人工处理。</p>
       <p class="muted">启动即将简历、偏好、必要职位/聊天文字发给所配置 AI 接口。自动化可能受平台限制；不绕过验证码。首次上线请保持试运行。</p>
       <div class="actions"><button type="submit" class="primary">保存配置</button><button type="button" id="export">导出配置（不含 Key）</button><button type="button" id="import">导入配置</button><input id="importFile" type="file" accept="application/json" hidden></div></form>
       <details open><summary>职位、招呼与待处理</summary><div id="entries"></div></details><details><summary>运行记录</summary><div id="logs"></div></details>
@@ -2200,6 +2311,46 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     const url = URL.createObjectURL(new Blob([text], { type: 'application/json;charset=utf-8' }));
     const a = document.createElement('a'); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
+  function debugReport(options = {}) {
+    const c = config();
+    if (!c.debugMode) throw new Error('请先在配置面板开启调试模式并保存');
+    const adapter = new Adapter(document, c.profile, [], { verifyChatWindow: c.verifyChatWindow });
+    const s = state(), cmd = get('command');
+    return { schemaVersion: 2, scriptVersion: VERSION, capturedAt: new Date().toISOString(),
+      checks: { verifyChatWindow: c.verifyChatWindow, historyAndDuplicateChecks: true, receiptChecks: true },
+      execution: { isWorker: !!workerId, taskStatus: s.task?.status || 'idle',
+        action: cmd?.type || null, phase: cmd?.phase || null },
+      snapshot: adapter.debugSnapshot({ includeMessageText: options.includeMessageText === true }) };
+  }
+  let debugHost = null;
+  function refreshDebugTools() {
+    if (!config().debugMode) { debugHost?.remove(); debugHost = null; return; }
+    if (debugHost?.isConnected) return;
+    debugHost = document.createElement('div'); debugHost.id = 'boss-ai-debug-host';
+    debugHost.style.cssText = 'position:fixed;left:18px;bottom:18px;z-index:2147483647';
+    const ui = debugHost.attachShadow({ mode: 'closed' });
+    ui.innerHTML = `<style>:host{all:initial;font:14px/1.5 system-ui;color:#172b3a}*{box-sizing:border-box}button{font:inherit;cursor:pointer;padding:8px 12px;background:#fff;border:1px solid #a9bfca;border-radius:7px;color:#173644}section{width:min(540px,92vw);padding:14px;border:1px solid #a9bfca;border-radius:10px;background:#fff;box-shadow:0 8px 30px #1234;max-height:70vh;overflow:auto;margin-bottom:8px}section[hidden]{display:none}textarea{width:100%;height:240px;resize:vertical;font:12px/1.4 monospace;margin:8px 0}p{margin:7px 0}h3{margin:0;font-size:16px}</style>
+      <section id="report" hidden><h3>聊天页面调试 v${VERSION}</h3><p>先手动展开目标会话再采集。默认仅输出结构、消息方向和正文长度，不含正文或Key。</p><label><input id="includeText" type="checkbox"> 包含最近消息正文（仅本次，最多20条，每段500字）</label><p>勾选后再次点击下方采集按钮生效；正文可能包含招聘者信息和联系方式，复制前核对。</p><p id="message"></p><textarea id="data" readonly aria-label="页面诊断信息"></textarea><button id="copy">复制诊断信息</button> <button id="save">下载JSON</button> <button id="hide">收起</button></section><button id="capture">调试：获取聊天页面信息</button>`;
+    document.documentElement.append(debugHost);
+    const q = id => ui.getElementById(id);
+    q('capture').onclick = () => {
+      q('report').hidden = false; q('data').value = '';
+      try {
+        const report = debugReport({ includeMessageText: q('includeText').checked });
+        q('data').value = JSON.stringify(report, null, 2);
+        q('message').textContent = (report.snapshot.messages?.contentIncluded ? '本次报告包含消息正文。' : '本次报告不含正文。') + '已记录每条消息的方向、正文匹配与卡片结构，可复制给开发者定位。';
+      }
+      catch { q('message').textContent = '采集失败，请确认调试模式已保存并刷新页面重试。'; }
+      finally { q('includeText').checked = false; }
+    };
+    q('copy').onclick = async () => {
+      if (!q('data').value) return;
+      try { await navigator.clipboard.writeText(q('data').value); q('message').textContent = '诊断信息已复制'; }
+      catch { q('data').focus(); q('data').select(); q('message').textContent = '浏览器未允许自动复制，已选中内容，请按Ctrl+C'; }
+    };
+    q('save').onclick = () => { if (q('data').value) download('boss-ai-debug.json', q('data').value); };
+    q('hide').onclick = () => { q('report').hidden = true; };
+  }
   function currentActivity() {
     const s = state(), cmd = get('command');
     if (s.task?.status !== 'running') return '';
@@ -2260,8 +2411,9 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     q('logs').textContent = s.logs.slice(0, 30).map(x => fmt(x.at) + ' ' + x.message).join('\n'); q('logs').style.whiteSpace = 'pre-wrap';
   }
   if (typeof module === 'object' && module.exports) {
-    module.exports = { renewLease, releaseLease, start, requestStart, stop, pump, analyze, testConnection, approveContactRetry, settle, chatDecision, requestAI, command, closeManagedWorker, clearWorkerBlock, disableAutoSend, requestClearActivity, completeClearActivity, quarantinePending, currentActivity, generateResume, maintainRuntime }; return;
+    module.exports = { renewLease, releaseLease, start, requestStart, stop, pump, analyze, testConnection, approveContactRetry, settle, chatDecision, requestAI, command, closeManagedWorker, clearWorkerBlock, disableAutoSend, requestClearActivity, completeClearActivity, quarantinePending, currentActivity, generateResume, maintainRuntime, debugReport }; return;
   }
+  refreshDebugTools(); setInterval(refreshDebugTools, 1000);
   if (workerId) {
     const banner = document.createElement('div'); banner.textContent = `AI 求职工作标签页 v${VERSION} · 请勿手动切换会话或输入消息 · 停止请在主搜索页操作`;
     banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:8px;background:#fff2cf;color:#593b00;z-index:2147483647;font:14px system-ui';

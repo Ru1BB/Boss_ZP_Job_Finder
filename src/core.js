@@ -31,7 +31,7 @@
     refreshMinSeconds: 10, refreshMaxSeconds: 60, maxReplies: 5,
     scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false, verifyChatWindow: true,
     openRejected: true, verifiedEmptyContact: false,
-    switchCategoryOnExhausted: true,
+    switchCategoryOnExhausted: true, debugMode: false,
     resumeName: '', internshipOnly: true, requiredCity: '北京', profile: {}
   });
   const fail = message => { throw new Error(message); };
@@ -78,7 +78,7 @@
     for (const key of ['baseUrl', 'model', 'apiKey', 'resume', 'preferences', 'screeningPrompt', 'greetingPrompt', 'resumeName', 'requiredCity']) {
       if (typeof c[key] !== 'string') fail(`配置 ${key} 必须是文字`);
     }
-    for (const key of ['autoSend', 'verifyChatWindow', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact', 'switchCategoryOnExhausted']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
+    for (const key of ['autoSend', 'verifyChatWindow', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact', 'switchCategoryOnExhausted', 'debugMode']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
     for (const [key, min, max] of [['threshold', 0, 100], ['maxContacts', 1, 500],
       ['sendIntervalSeconds', 1, 86400], ['refreshMinSeconds', 1, 3600],
       ['refreshMaxSeconds', 1, 3600], ['maxReplies', 1, 100], ['aiTimeoutSeconds', 30, 600]]) {
@@ -201,6 +201,13 @@
     return JSON.stringify([String(job.recruiterId), String(job.jobId)]);
   }
   const sensitive = text => /面试|约面|几点|周[一二三四五六日天]|明天|后天|到岗|入职|薪资|工资|待遇|底薪|期望薪|报价|微信|手机号|电话|邮箱|身份证|银行卡|转账|付款|验证码|下载|安装|点击链接|加.{0,3}(微|v|V)/i.test(text);
+  function isRejection(text) {
+    // Match complete rejection phrases, not isolated words such as “拒绝”.
+    return String(text || '').split(/[。！？!?；;\n]+/).some(part => {
+      if (/如果|假如|万一|是否|并非|不是说|不是不|并不是|不代表|不意味着|不会拒绝|不拒绝|不予拒绝/.test(part)) return false;
+      return /(?:您的?|你的?)(?:背景|经验|经历|技能|条件|简历|专业|能力).{0,40}(?:不(?:太|完全)?(?:符合|匹配|吻合|适合)|尚不符合|未(?:能)?达到)|(?:您|你|同学).{0,12}(?:不太适合|不符合.{0,12}要求)|(?:岗位|职位|需求|要求).{0,20}(?:与您|与你|和您|和你).{0,15}不(?:太)?匹配|(?:暂时|目前|暂).{0,6}不(?:予)?考虑|(?:暂时|目前|暂).{0,6}不(?:再)?推进|不(?:太)?合适|未通过.{0,10}(?:筛选|面试|评估)|(?:岗位|职位).{0,10}(?:已招满|已经招满|已关闭|已经关闭|暂停招聘)|(?:祝您|祝你).{0,20}(?:找到|找到更|求职顺利)|(?:很遗憾|抱歉).{0,20}(?:无法|不能).{0,12}(?:录用|安排面试|继续推进)/.test(part);
+    });
+  }
   const wantsResume = text => !/不用|不必|不需要|不要|别发|无需|已(?:经)?收到|收到了|不方便|暂不|不用再/.test(text) && /(?:请|麻烦|方便|能|可以|能否|能不能).{0,12}(?:发|给|传|提供).{0,12}简历|(?:发|传|给).{0,8}(?:一份|一下|份|个|下).{0,8}简历|简历.{0,12}(?:发我|发来|发一下|给我|方便发)|resume\s*please/i.test(text);
   function decide(a, config) { return a.score >= config.threshold ? 'eligible' : 'rejected'; }
   function allowed(state, c, now) {
@@ -289,5 +296,5 @@
     return compacted;
   }
   return { AI_NOTICE, PROJECT_INTRO, PROJECT_URL, aiMessage, anonymousMessage, greetingMessage, isAIOutgoing, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, parseJSON, analysis, reply, pair,
-    sensitive, wantsResume, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner, temporaryFailure, runtimeStats, compactHistory, employmentUrl };
+    sensitive, wantsResume, isRejection, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner, temporaryFailure, runtimeStats, compactHistory, employmentUrl };
 });

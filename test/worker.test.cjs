@@ -229,9 +229,9 @@ test('expired window, wrong identity and verification block all sends', async ()
     assert.equal(events.includes('send'), false); assert.ok(events.includes('closeWorker'));
   }
 });
-test('requested unique attachment sends once and checks receipt', async () => {
+test('even a verified requested attachment never opens or sends a file', async () => {
   const { events, result } = await run({ type: 'resume' });
-  assert.equal(result.ok, true); assert.equal(result.data.confirmed, true); assert.equal(events.filter(x => x === 'resumeSend').length, 1);
+  assert.equal(result.ok, false); assert.match(result.error, /附件自动发送已停用/); assert.equal(events.includes('resumeSend'), false); assert.equal(events.includes('resumeOpen'), false);
 });
 test('attachment mismatch and no explicit request never send files', async () => {
   for (const opts of [{ ambiguousResume: true }, { history: [{ id: 'in1', role: 'recruiter', text: '不用发简历', rich: false }] }]) {

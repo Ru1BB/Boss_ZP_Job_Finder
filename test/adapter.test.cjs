@@ -20,6 +20,133 @@ function adapter(selectors = {}, profile = {}, options = {}) {
   return new DOMAdapter(doc, profile, [], options);
 }
 
+test('debug snapshots locate editors and send controls without including text, URLs or identity values', () => {
+  const editor = element({ 'data-boss-id': 'PRIVATE-BOSS-ID' }, 'PRIVATE-DRAFT');
+  editor.tagName = 'DIV'; editor.className = 'chat-input private-input'; editor.id = 'PRIVATE-EDITOR-ID'; editor.isContentEditable = true;
+  editor.attributes = [{ name: 'class', value: editor.className }, { name: 'data-boss-id', value: 'PRIVATE-BOSS-ID' }];
+  editor.getBoundingClientRect = () => ({ x: 10, y: 20, width: 300, height: 100 });
+  const send = element({}, '发送'); send.tagName = 'BUTTON'; send.className = 'btn-send'; send.disabled = true;
+  const a = adapter({ [P.composer]: [editor], [P.send]: [send],
+    '[contenteditable="true"], textarea, [role="textbox"]': [editor], 'button, [role="button"], a, span': [send] });
+  a.doc.location.href += '?securityId=PRIVATE-URL-TOKEN';
+  const result = a.debugSnapshot(), text = JSON.stringify(result);
+  assert.ok(result.candidates.editors[0].selectorHint.includes('div.chat-input'));
+  assert.equal(result.candidates.configuredSend[0].disabled, true);
+  assert.equal(result.candidates.editors[0].box.width, 300);
+  for (const secret of ['PRIVATE-DRAFT', 'PRIVATE-BOSS-ID', 'PRIVATE-EDITOR-ID', 'PRIVATE-URL-TOKEN']) assert.equal(text.includes(secret), false);
+});
+test('debug snapshots remain available when normal diagnostics or selectors fail', () => {
+  const a = adapter(); a.diagnostic = () => { throw new Error('PRIVATE-ERROR-DETAIL'); };
+  const previous = a.nodes.bind(a); a.nodes = selector => { if (selector === P.chatHeader) throw new Error('bad selector'); return previous(selector); };
+  const result = a.debugSnapshot(); assert.equal(result.basic.unavailable, true);
+  assert.ok(result.errors.includes('chatContainers')); assert.ok(result.errors.includes('basicDiagnostic'));
+  assert.equal(JSON.stringify(result).includes('PRIVATE-ERROR-DETAIL'), false);
+});
+
+function debugMessage(id, text, role = 'recruiter', selectors = {}) {
+  const row = element(id ? { 'data-mid': id } : {}, text, { [P.messageText]: text ? [element({}, text)] : [], ...selectors });
+  row.tagName = 'LI'; row.className = 'message-item ' + (role === 'candidate' ? 'item-myself' : 'item-friend');
+  row.matches = selector => selector === (role === 'candidate' ? P.messageOutgoing : P.messageIncoming);
+  return row;
+}
+function messageWithAvatar(role = 'recruiter') {
+  const row = debugMessage('fixture-message', '请介绍一下项目经验', role);
+  const content = element(), figure = element(), image = element();
+  content.tagName = 'DIV'; content.className = 'message-content'; content.matches = selector => selector === '.message-content';
+  figure.tagName = 'DIV'; figure.className = 'figure'; figure.matches = selector => selector === '.figure';
+  image.tagName = 'IMG'; image.className = 'image-circle'; image.matches = selector => selector === 'img.image-circle';
+  image.parentElement = figure; figure.parentElement = content; content.parentElement = row; content.firstElementChild = figure;
+  row.selectors[P.richMessage] = [image];
+  const a = adapter({ [P.messages]: [row] }); a.assertIdentity = () => {};
+  return { a, row, content, figure, image };
+}
+test('the observed BOSS avatar does not turn a text message into rich content', () => {
+  for (const role of ['recruiter', 'candidate']) {
+    const { a } = messageWithAvatar(role), history = a.history({});
+    assert.equal(history[0].rich, false); assert.equal(history[0].text, '请介绍一下项目经验');
+    assert.equal(history[0].role, role);
+    const report = a.debugSnapshot().messages.rowDetails[0];
+    assert.equal(report.matchedRichCount, 1); assert.equal(report.ignoredAvatarCount, 1);
+    assert.equal(report.richCount, 0); assert.equal(report.contentKind, 'text');
+    assert.equal(report.ignoredAvatarStructure[0].classes[0], 'image-circle');
+  }
+});
+test('real pictures, audio and attachment cards remain rich beside a recognized avatar', () => {
+  for (const tag of ['IMG', 'AUDIO', 'DIV']) {
+    const { a, row } = messageWithAvatar();
+    const payload = element(); payload.tagName = tag; payload.className = tag === 'DIV' ? 'file-card' : 'message-payload'; payload.matches = () => false;
+    row.selectors[P.richMessage].push(payload);
+    assert.equal(a.history({})[0].rich, true);
+    const report = a.debugSnapshot().messages.rowDetails[0];
+    assert.equal(report.ignoredAvatarCount, 1); assert.equal(report.richCount, 1);
+  }
+});
+test('rounded images outside the exact avatar slot are not ignored', () => {
+  for (const change of [fixture => { fixture.content.parentElement = element(); },
+    fixture => { fixture.content.firstElementChild = element(); },
+    fixture => { fixture.figure.matches = () => false; }]) {
+    const fixture = messageWithAvatar(); change(fixture);
+    assert.equal(fixture.a.history({})[0].rich, true);
+    assert.equal(fixture.a.debugSnapshot().messages.rowDetails[0].ignoredAvatarCount, 0);
+  }
+});
+test('deep diagnostics report message parsing shapes without exporting message IDs or text by default', () => {
+  const row = debugMessage('PRIVATE-ID', 'PRIVATE-MESSAGE-CONTENT');
+  const result = adapter({ [P.messages]: [row] }).debugSnapshot();
+  const info = result.messages.rowDetails[0];
+  assert.equal(info.hasMessageId, true); assert.equal(info.direction, 'recruiter');
+  assert.equal(info.textMatchCount, 1); assert.equal(info.textLength, 'PRIVATE-MESSAGE-CONTENT'.length);
+  assert.equal(info.historyRowShapeValid, true); assert.equal(info.contentKind, 'text');
+  assert.equal(result.messages.contentIncluded, false);
+  assert.equal(JSON.stringify(result).includes('PRIVATE-ID'), false); assert.equal(JSON.stringify(result).includes('PRIVATE-MESSAGE-CONTENT'), false);
+});
+test('deep diagnostics identify unmatched card text and show child class names instead of its text', () => {
+  const child = element({}, 'PRIVATE-CARD-TEXT'); child.tagName = 'DIV'; child.className = 'unknown-card-content';
+  const row = debugMessage('id', '', 'recruiter', { '[class], p, span': [child] }); row.innerText = 'PRIVATE-CARD-TEXT';
+  const result = adapter({ [P.messages]: [row] }).debugSnapshot(), info = result.messages.rowDetails[0];
+  assert.equal(info.contentKind, 'card-or-unmatched-text'); assert.equal(info.textLength, 0);
+  assert.ok(info.issues.includes('row-has-content-but-no-parsed-text'));
+  assert.equal(info.childStructure[0].classes[0], 'unknown-card-content'); assert.equal(info.childStructure[0].textLength, 17);
+  assert.ok(result.diagnosis.some(message => message.includes('正文选择器')));
+  assert.equal(JSON.stringify(result).includes('PRIVATE-CARD-TEXT'), false);
+});
+test('deep diagnostics distinguish missing IDs, duplicate IDs and unknown direction', () => {
+  const missing = debugMessage('', '测试消息'), duplicate = debugMessage('duplicate', '重复消息');
+  missing.matches = () => false;
+  const result = adapter({ [P.messages]: [missing, duplicate, debugMessage('duplicate', '其他消息', 'candidate')] }).debugSnapshot();
+  assert.ok(result.messages.rowDetails[0].issues.includes('missing-message-id'));
+  assert.equal(result.messages.rowDetails[0].direction, 'unknown');
+  assert.equal(result.messages.rowDetails[1].duplicateId, true); assert.equal(result.messages.rowDetails[2].historyRowShapeValid, false);
+  assert.equal(JSON.stringify(result).includes('"duplicate"'), false);
+});
+test('message content export is explicit, bounded and separate from identity attributes', () => {
+  const rows = Array.from({ length: 22 }, (_, i) => debugMessage('PRIVATE-ID-' + i, '正文内容'.repeat(200)));
+  const a = adapter({ [P.messages]: rows });
+  assert.equal(a.debugSnapshot({ includeMessageText: 'true' }).messages.contentIncluded, false);
+  const result = a.debugSnapshot({ includeMessageText: true });
+  assert.equal(result.messages.inspectedRows, 20); assert.equal(result.messages.olderRowsOmitted, 2);
+  assert.equal(result.messages.rowDetails[0].row, 3);
+  assert.equal(result.messages.rowDetails[0].parsedTextPreview.length, 500);
+  assert.equal(result.messages.rowDetails[0].previewTruncated, true);
+  assert.equal(JSON.stringify(result).includes('PRIVATE-ID-'), false);
+});
+test('debug button status includes the disabled CSS class and distinguishes offscreen nodes', () => {
+  const send = element(); send.tagName = 'BUTTON'; send.className = 'btn-send disabled';
+  send.getBoundingClientRect = () => ({ x: 20, y: -100, width: 60, height: 30 });
+  const result = adapter({ [P.send]: [send] }).debugSnapshot();
+  assert.equal(result.candidates.configuredSend[0].disabled, true);
+  assert.equal(result.candidates.configuredSend[0].inViewport, false);
+});
+test('rich message diagnostics reveal element structure without exporting image URLs', () => {
+  const image = element({ src: 'https://private.example/image-token' }); image.tagName = 'IMG'; image.className = 'avatar';
+  const row = debugMessage('id', '消息正文', 'recruiter', { [P.richMessage]: [image] });
+  const result = adapter({ [P.messages]: [row] }).debugSnapshot();
+  assert.equal(result.messages.rowDetails[0].contentKind, 'rich-content');
+  assert.equal(result.messages.rowDetails[0].richStructure[0].tag, 'IMG');
+  assert.equal(result.messages.rowDetails[0].richStructure[0].classes[0], 'avatar');
+  assert.equal(JSON.stringify(result).includes('image-token'), false);
+});
+
 test('health ignores challenge keywords in actual jobs and our own status log', () => {
   const a = adapter({ [P.detail]: [element({}, '负责安全验证和验证码系统')] });
   a.doc.body = { innerText: '安全验证 访问过于频繁' };
@@ -410,4 +537,27 @@ test('existing rendered drafts and ambiguous partial insertion are preserved', (
   a.doc.createRange = () => ({ selectNodeContents() {}, collapse() {} });
   a.doc.execCommand = () => { input.innerText = '部分写入'; return false; };
   assert.throws(() => a.fill('新文字'), /写入结果不明确/); assert.equal(input.innerText, '部分写入');
+});
+
+
+test('observed attachment system receipt is ignored without inventing a sender', () => {
+  const text = '您的附件简历 测试.pdf 已发送给Boss点击查看附件';
+  const row = debugMessage('receipt-1', text);
+  row.matches = selector => selector === '.message-item.item-system';
+  row.selectors['.hyper-link.text'] = [element({}, text)];
+  const a = adapter({ [P.messages]: [row] }); a.assertIdentity = () => {};
+  assert.equal(a.history({}).length, 0);
+  const report = a.debugSnapshot().messages.rowDetails[0];
+  assert.equal(report.ignoredSystemCard, true); assert.equal(report.historyRowShapeValid, true);
+  assert.equal(report.issues.length, 0);
+  row.innerText = row.textContent = '未知系统消息';
+  assert.throws(() => a.history({}), /无法判别消息方向/);
+});
+
+test('recruiter quoting an attachment receipt remains an incoming message', () => {
+  const text = '您的附件简历 测试.pdf 已发送给Boss点击查看附件';
+  const row = debugMessage('quoted-receipt', text);
+  row.selectors['.hyper-link.text'] = [element({}, text)];
+  const a = adapter({ [P.messages]: [row] }); a.assertIdentity = () => {};
+  assert.equal(a.history({})[0].role, 'recruiter');
 });

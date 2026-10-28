@@ -51,7 +51,7 @@
     }
     nodes(selector, scope = this.doc) {
       if (!selector) return [];
-      try { return [...scope.querySelectorAll(selector)].filter(n => n.getClientRects().length && !n.closest('#boss-ai-host')); }
+      try { return [...scope.querySelectorAll(selector)].filter(n => n.getClientRects().length && !n.closest('#boss-ai-host, #boss-ai-debug-host')); }
       catch { throw new Error('页面选择器无效，请检查高级适配配置'); }
     }
     one(selector, scope = this.doc, optional = false) {
@@ -245,7 +245,23 @@
       if (actual.jobId === job.jobId) return;
       throw new Error('当前会话与目标岗位不一致，已停止');
     }
+    isAvatarImage(media, row) {
+      // Observed avatar slot: message row > .message-content > .figure:first-child
+      // > img.image-circle. Rounded images inside message bodies stay rich content.
+      if (media.tagName !== 'IMG' || !media.matches?.('img.image-circle')) return false;
+      const figure = media.parentElement, content = figure?.parentElement;
+      return !!(figure?.matches?.('.figure') && content?.matches?.('.message-content') &&
+        content.parentElement === row && content.firstElementChild === figure);
+    }
+    richNodes(row) { return this.nodes(this.p.richMessage, row).filter(media => !this.isAvatarImage(media, row)); }
     isSystemNotice(n) {
+      // Only the observed platform attachment receipt is ignored, never arbitrary
+      // unknown-direction messages or recruiter text quoting a receipt.
+      if (n.matches('.message-item.item-system') && !n.matches(this.p.messageIncoming) && !n.matches(this.p.messageOutgoing)) {
+        const receipt = this.text('.hyper-link.text', n).replace(/\s/g, '');
+        if (/^您的附件简历.+已发送给Boss点击查看附件$/.test(receipt) &&
+            receipt === String(n.innerText || n.textContent || '').replace(/\s/g, '') && !this.richNodes(n).length) return true;
+      }
       // This allowlist identifies the platform's competitor-analysis promotion,
       // not arbitrary blue cards or messages that merely quote its title.
       if (!n.matches(this.p.messageIncoming) || n.matches(this.p.messageOutgoing)) return false;
@@ -255,7 +271,7 @@
       if (titles.length !== 1 || buttons.length !== 1) return false;
       const title = this.normalizeField(titles[0].innerText || titles[0].textContent).replace(/\s/g, '');
       if (!/^(?:你|您)与该职位竞争者PK情况$/i.test(title) || this.normalizeField(buttons[0].innerText || buttons[0].textContent) !== '查看详细分析') return false;
-      if (this.text(this.p.messageText, n) || this.nodes(this.p.richMessage, n).some(media => !card.contains(media))) return false;
+      if (this.text(this.p.messageText, n) || this.richNodes(n).some(media => !card.contains(media))) return false;
       // Preserve any real text attached outside the card. Only the row's time
       // label may coexist with this known system notice.
       const cardText = this.normalizeField(card.innerText || card.textContent);
@@ -272,10 +288,10 @@
         if (!id || seen.has(id)) throw new Error('消息缺少唯一 ID 或 ID 重复');
         seen.add(id);
         const incoming = n.matches(this.p.messageIncoming), outgoing = n.matches(this.p.messageOutgoing);
-        if (incoming === outgoing) throw new Error('无法判别消息方向，已停止该会话');
         if (this.isSystemNotice(n)) return [];
+        if (incoming === outgoing) throw new Error('无法判别消息方向，已停止该会话');
         return [{ id, role: incoming ? 'recruiter' : 'candidate', text: this.text(this.p.messageText, n).slice(0, 6000),
-          rich: this.nodes(this.p.richMessage, n).length > 0 }];
+          rich: this.richNodes(n).length > 0 }];
       });
     }
     selectConversation(job) {
@@ -364,6 +380,107 @@
         messageSummary: { visibleRows: visibleMessages.length, ignoredSystemCards: ignoredCards, conversationRows: visibleMessages.length - ignoredCards },
         chat,
         warning: '诊断只读取页面，不证明立即沟通是否自动发送招呼。verified 标记必须在人工验证流程后设置。' };
+    }
+    debugSnapshot(options = {}) {
+      const includeMessageText = options.includeMessageText === true;
+      const errors = [];
+      const safe = (name, fn, fallback) => { try { return fn(); } catch { errors.push(name); return fallback; } };
+      const nodes = (name, selector) => safe(name, () => this.nodes(selector), []);
+      const classes = node => String(typeof node.className === 'string' ? node.className : '').split(/\s+/)
+        .filter(x => /^[A-Za-z_][\w-]{0,79}$/.test(x)).slice(0, 6);
+      const selectorPart = node => {
+        const tag = /^[a-z][\w-]*$/i.test(node.tagName || '') ? node.tagName.toLowerCase() : 'element';
+        const siblings = [...(node.parentElement?.children || [])].filter(n => n.tagName === node.tagName);
+        return tag + classes(node).map(c => '.' + c).join('') + (siblings.length > 1 ? ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')' : '');
+      };
+      const describe = node => {
+        const ancestors = []; let current = node;
+        for (let i = 0; current && i < 5; i++, current = current.parentElement) ancestors.unshift(selectorPart(current));
+        const rect = node.getBoundingClientRect?.();
+        return { tag: node.tagName || '', classes: classes(node), hasId: !!node.id,
+          selectorHint: ancestors.join(' > '),
+          attributes: [...(node.attributes || [])].map(a => a.name).filter(n => /^(?:id|class|role|type|contenteditable|disabled|aria-|data-)/.test(n) && !n.startsWith('data-v-')).slice(0, 25),
+          editable: !!node.isContentEditable, visible: this.healthVisible(node), disabled: !!node.disabled || node.getAttribute?.('aria-disabled') === 'true' ||
+            !!node.classList?.contains('disabled') || String(typeof node.className === 'string' ? node.className : '').split(/\s+/).includes('disabled'),
+          inViewport: rect ? rect.width > 0 && rect.height > 0 && (rect.x || 0) + rect.width > 0 && (rect.y || 0) + rect.height > 0 &&
+            (rect.x || 0) < (this.doc.defaultView?.innerWidth ?? Infinity) && (rect.y || 0) < (this.doc.defaultView?.innerHeight ?? Infinity) : null,
+          box: rect ? { x: Math.round(rect.x || 0), y: Math.round(rect.y || 0), width: Math.round(rect.width || 0), height: Math.round(rect.height || 0) } : null };
+      };
+      const capture = (name, selector, max = 8) => nodes(name, selector).slice(0, max).map(describe);
+      const sendCandidates = nodes('sendCandidates', 'button, [role="button"], a, span')
+        .filter(n => /^发送$/.test((n.innerText || n.textContent || '').trim())).slice(0, 8).map(describe);
+      const candidates = {
+        chatContainers: capture('chatContainers', this.p.chatHeader),
+        chatPositions: capture('chatPositions', '.chat-position-content, .chat-position-content .position-content'),
+        editors: capture('editors', '[contenteditable="true"], textarea, [role="textbox"]'),
+        configuredEditor: capture('configuredEditor', this.p.composer),
+        configuredSend: capture('configuredSend', this.p.send), sendCandidates,
+        conversationRows: capture('conversationRows', this.p.conversationRow, 5),
+        recentMessageRows: nodes('recentMessageRows', this.p.messages).slice(-5).map(describe),
+        frames: capture('frames', 'iframe', 5)
+      };
+      const messageNodes = nodes('messageRows', this.p.messages);
+      const ids = messageNodes.map((node, i) => safe('messageId.' + i, () => node.getAttribute(this.p.messageIdAttr) ||
+        (this.p.messageIdAttr === 'data-mid' ? node.getAttribute('data-message-id') : null), null));
+      const idCounts = new Map(); for (const id of ids) if (id) idCounts.set(id, (idCounts.get(id) || 0) + 1);
+      const offset = Math.max(0, messageNodes.length - 20);
+      const rowDetails = messageNodes.slice(-20).map((node, i) => {
+        const index = offset + i, label = 'message.' + index;
+        const incoming = safe(label + '.incoming', () => node.matches(this.p.messageIncoming), null);
+        const outgoing = safe(label + '.outgoing', () => node.matches(this.p.messageOutgoing), null);
+        const directionKnown = typeof incoming === 'boolean' && typeof outgoing === 'boolean' && incoming !== outgoing;
+        const textNodes = safe(label + '.textNodes', () => this.nodes(this.p.messageText, node), []);
+        const text = safe(label + '.text', () => this.text(this.p.messageText, node), '');
+        const rowText = String(node.innerText || node.textContent || '').trim();
+        const matchedRich = safe(label + '.rich', () => this.nodes(this.p.richMessage, node), []);
+        const ignoredAvatars = matchedRich.filter(media => this.isAvatarImage(media, node));
+        const rich = matchedRich.filter(media => !this.isAvatarImage(media, node));
+        const systemCard = safe(label + '.systemCard', () => this.isSystemNotice(node), false);
+        const duplicateId = !!ids[index] && idCounts.get(ids[index]) > 1;
+        const issues = [];
+        if (!ids[index]) issues.push('missing-message-id');
+        if (duplicateId) issues.push('duplicate-message-id');
+        if (!directionKnown && !systemCard) issues.push('unknown-or-conflicting-direction');
+        if (!systemCard && !text.trim()) issues.push(rowText ? 'row-has-content-but-no-parsed-text' : 'no-parsed-text');
+        if (!systemCard && rich.length) issues.push('rich-content');
+        const children = safe(label + '.structure', () => this.nodes('[class], p, span', node), []);
+        const result = { row: index + 1, ...describe(node), hasMessageId: !!ids[index], duplicateId,
+          direction: directionKnown ? incoming ? 'recruiter' : 'candidate' : 'unknown',
+          textMatchCount: textNodes.length, textLength: text.length, parsedTextLength: Math.min(6000, text.length),
+          rowTextLength: rowText.length, richCount: rich.length, ignoredSystemCard: systemCard,
+          matchedRichCount: matchedRich.length, ignoredAvatarCount: ignoredAvatars.length,
+          textStructure: textNodes.slice(0, 6).map(n => ({ ...describe(n), textLength: String(n.innerText || n.textContent || '').trim().length })),
+          richStructure: rich.slice(0, 8).map(describe),
+          ignoredAvatarStructure: ignoredAvatars.slice(0, 4).map(describe),
+          historyRowShapeValid: !!ids[index] && !duplicateId && (directionKnown || systemCard),
+          contentKind: systemCard ? 'ignored-system-card' : rich.length ? 'rich-content' : text.trim() ? 'text' : rowText ? 'card-or-unmatched-text' : 'empty',
+          issues, childStructure: children.slice(0, 30).map(child => ({ tag: child.tagName || '', classes: classes(child),
+            textLength: String(child.innerText || child.textContent || '').trim().length })),
+          structureTruncated: children.length > 30 };
+        if (includeMessageText) {
+          result.parsedTextPreview = text.slice(0, 500); result.rowTextPreview = rowText.slice(0, 500);
+          result.previewTruncated = text.length > 500 || rowText.length > 500;
+        }
+        return result;
+      });
+      const diagnosis = [];
+      if (!messageNodes.length) diagnosis.push('未找到消息行：先展开目标会话，再核对messages选择器');
+      if (rowDetails.some(row => row.issues.includes('missing-message-id') || row.duplicateId)) diagnosis.push('存在缺失或重复消息ID，会阻止正常读取聊天历史');
+      if (rowDetails.some(row => row.direction === 'unknown' && !row.ignoredSystemCard)) diagnosis.push('部分消息无法区分收发方向，需要核对消息方向选择器');
+      if (rowDetails.some(row => row.contentKind === 'card-or-unmatched-text')) diagnosis.push('消息行有内容，但正文选择器没有读到文字；查看对应childStructure定位正文或卡片');
+      if (rowDetails.some(row => row.contentKind === 'rich-content')) diagnosis.push('存在图片/文件等非纯文本内容，需结合卡片结构判断，不能当作纯文字自动回复');
+      if (rowDetails.length && rowDetails.every(row => row.historyRowShapeValid && (row.ignoredSystemCard || row.textLength > 0 && row.richCount === 0))) diagnosis.push('已采样消息的ID、方向和纯文字正文形状可读取；不代表发送流程已验证');
+      const original = safe('basicDiagnostic', () => this.diagnostic(), { unavailable: true });
+      const basic = { counts: original.counts || {}, messageSummary: original.messageSummary || null,
+        job: original.job || null, unavailable: !!original.unavailable,
+        identityStatus: original.identity === '岗位 ID 可核对' ? 'job-id-readable' : /岗位名称可读取/.test(original.identity || '') ? 'job-title-readable' :
+          /尚未选中/.test(original.identity || '') ? 'no-selected-conversation' : 'missing-or-ambiguous' };
+      return { page: this.doc.location.pathname,
+        health: safe('health', () => this.healthIssue()?.kind || 'normal', 'unknown'),
+        basic, candidates, messages: { totalMatchedRows: messageNodes.length, inspectedRows: rowDetails.length,
+          olderRowsOmitted: offset, contentIncluded: includeMessageText, rowDetails }, diagnosis, errors,
+        notice: includeMessageText ? '本次已勾选包含最近20条消息正文，每段最多500字，可能含招聘者信息或联系方式；分享前核对。仍不读取草稿、身份属性值或插件配置中的简历与Key，不提交AI、不发送消息。' :
+          '只读诊断：默认只记录结构、方向、ID是否存在和文字长度，不包含正文、草稿、完整URL、身份属性值、简历或Key。selectorHint仅为结构线索，不提交AI、不发送消息。' };
     }
     categoryName(node) {
       const values = [node.getAttribute('title'), node.getAttribute('aria-label'),

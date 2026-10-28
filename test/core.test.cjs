@@ -2,6 +2,13 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const C = require('../src/core.js');
 
+test('debug mode defaults off and cannot change send or identity permissions', () => {
+  assert.equal(C.defaults().debugMode, false);
+  const c = C.fixedConfig({ debugMode: true }); C.validateConfig(c);
+  assert.equal(c.autoSend, false); assert.equal(c.verifyChatWindow, true);
+  assert.throws(() => C.validateConfig({ ...c, debugMode: 'true' }));
+});
+
 test('employment URL replaces duplicate types and preserves other search conditions', () => {
   const url = 'https://www.zhipin.com/web/geek/jobs?city=101010100&query=Python&jobType=1903&jobType=1901#example';
   const internship = new URL(C.employmentUrl(url, C.defaults()));
@@ -360,4 +367,10 @@ test('multi-tab lease elects one deterministic winner and expires stale tabs', (
   assert.equal(C.leaseWinner([b, a], 5), 'a');
   assert.equal(C.leaseWinner([a, { ...b, expires: 200 }], 100), 'b');
   assert.equal(C.leaseWinner([a, b], 101), null);
+});
+
+
+test('explicit recruiter rejections are recognized without matching quoted keywords or neutral questions', () => {
+  for (const text of ['您的经验与我们当前项目的需求并不完全吻合。祝您找到更好的机会！', '抱歉，目前不考虑', '不太合适', '这个岗位已招满', '很遗憾，无法安排面试', '您的简历不符合岗位要求']) assert.equal(C.isRejection(text), true, text);
+  for (const text of ['请介绍一下项目经验', '如果不合适你会怎么处理？', '我们不会拒绝没有实习经验的同学', '并非您的经验不符合要求', '不是不合适，还需要评估', '拒绝按钮是做什么的？']) assert.equal(C.isRejection(text), false, text);
 });

@@ -27,6 +27,27 @@ function quickRetryTimers(r) {
   r.context.setTimeout = (fn, ms) => setTimeout(fn, ms === 1000 || ms === 2000 ? 0 : ms);
 }
 
+test('debug report exposes only execution flags and a read-only DOM snapshot', () => {
+  const disabled = runtime(); assert.throws(() => disabled.api.debugReport(), /调试模式/);
+  const r = runtime({ debugMode: true, verifyChatWindow: false, resume: 'PRIVATE-RESUME', apiKey: 'PRIVATE-KEY' });
+  r.context.BossAdapter.Adapter.prototype.debugSnapshot = () => ({ page: '/web/geek/chat', candidates: { editors: [] } });
+  const before = JSON.stringify([...r.store]);
+  r.context.GM_xmlhttpRequest = () => { assert.fail('debug must never call AI'); };
+  r.context.GM_openInTab = () => { assert.fail('debug must never open or send'); };
+  const report = r.api.debugReport();
+  assert.equal(report.checks.verifyChatWindow, false); assert.equal(report.checks.historyAndDuplicateChecks, true);
+  assert.equal(report.checks.receiptChecks, true);
+  assert.equal(JSON.stringify(report).includes('PRIVATE-KEY'), false); assert.equal(JSON.stringify(report).includes('PRIVATE-RESUME'), false);
+  assert.equal(JSON.stringify([...r.store]), before);
+});
+test('message text inclusion is passed only for this explicit diagnostic call', () => {
+  const r = runtime({ debugMode: true }), flags = [];
+  r.context.BossAdapter.Adapter.prototype.debugSnapshot = options => { flags.push(options.includeMessageText); return {}; };
+  assert.equal(r.api.debugReport({ includeMessageText: true }).schemaVersion, 2);
+  r.api.debugReport(); assert.deepEqual(flags, [true, false]);
+  assert.equal(Object.hasOwn(r.store.get('bossai.v1.config'), 'includeMessageText'), false);
+});
+
 function failHealth(r, kind) {
   r.context.BossAdapter.Adapter.prototype.health = () => {
     const e = new Error('页面异常'); e.code = 'PAGE_HEALTH'; e.healthIssue = { kind }; throw e;
@@ -420,7 +441,7 @@ test('an attachment selection failure is isolated after reservation', async () =
   workerStub(r, () => ({ ok: false, error: '无法唯一识别指定简历' }));
   await r.api.pump(); assert.equal(r.state().task.status, 'running');
   assert.equal(r.state().entries[entry.key].handoff, true); assert.equal(r.state().entries[entry.key].pendingReply, undefined);
-  assert.equal(r.state().outbox[0].status, 'not-sent');
+  assert.equal(r.state().outbox.length, 0);
 });
 
 test('manual stop blocks scheduler restart for the same Beijing time window', async () => {
@@ -554,10 +575,10 @@ test('critical matters and rich messages transfer before calling AI', async () =
     assert.equal(decision.action, 'handoff');
   }
 });
-test('resume request produces an attachment decision without an AI call', async () => {
+test('resume request transfers to human without an AI call', async () => {
   const r = runtime();
   const decision = await r.api.chatDecision(r.c, {}, [{ id: 'i1', role: 'recruiter', text: '请发一份简历', rich: false }]);
-  assert.equal(decision.action, 'resume'); assert.equal(decision.inboundId, 'i1');
+  assert.equal(decision.action, 'handoff'); assert.match(decision.reason, /手动处理/); assert.equal(decision.inboundId, 'i1');
 });
 test('no new recruiter messages means no duplicate AI reply', async () => {
   const r = runtime();
@@ -949,4 +970,13 @@ test('existing AI greeting is recorded as a duplicate rather than an unknown del
   const item = { id: 'old', key: 'x', kind: 'contact', payload: {} }; s.outbox.push(item);
   r.api.settle(s, item, { confirmed: false, priorAI: true, reason: '已存在AI标注' });
   assert.equal(item.status, 'duplicate'); assert.equal(s.entries.x.status, 'contacted');
+});
+
+
+test('recruiter rejection stops that conversation before any AI request, ignoring candidate text', async () => {
+  const r = runtime(); let calls = 0;
+  r.context.GM_xmlhttpRequest = () => { calls++; throw new Error('unexpected request'); };
+  const decision = await r.api.chatDecision(r.c, {}, [{ id: 'no1', role: 'recruiter', text: '您的经验与我们当前项目的需求并不完全吻合。', rich: false }]);
+  assert.equal(decision.action, 'handoff'); assert.equal(decision.text, ''); assert.match(decision.reason, /已婉拒或拒绝/); assert.equal(calls, 0);
+  assert.equal(await r.api.chatDecision(r.c, {}, [{ id: 'own1', role: 'candidate', text: '不合适', rich: false }]), null);
 });
