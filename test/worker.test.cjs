@@ -65,7 +65,17 @@ async function run(options = {}) {
     document: { createElement: () => ({ style: {} }), documentElement: { append() {} } },
     GM_getValue: (k, fallback = null) => store.has(k) ? structuredClone(store.get(k)) : fallback,
     GM_setValue: (k, v) => store.set(k, structuredClone(v)), GM_listValues: () => [...store.keys()], GM_deleteValue: k => store.delete(k),
-    setInterval: f => callbacks.push(f), setTimeout: (f, ms) => { if (ms === 500 && options.stopDuringDelay) store.set('bossai.v1.stopRequest', { manual: true }); f(); }, Event: class {},
+    setInterval: f => callbacks.push(f), setTimeout: (f, ms) => {
+      if (ms === 500 && options.stopDuringDelay) store.set('bossai.v1.stopRequest', { manual: true });
+      if (ms === 500 && !options.freezeDuringDelay) { offset += options.slowWait || 500; if (options.slowWait) events.push('slowWait'); }
+      if (ms === 500 && options.freezeDuringDelay) {
+        if (!events.includes('freeze')) {
+          events.push('freeze'); offset += 16000;
+          if (options.competingWorker) store.set('bossai.v1.workerLease.worker.competitor', { owner: 'competitor', claimedAt: now, expires: now + 60000 });
+        } else offset += 500;
+      }
+      f();
+    }, Event: class {},
     window: { close() { events.push('closeWorker'); if (options.closeThrows) throw new Error('close failed'); } },
     GM_getTab: callback => callback({}), GM_saveTab(tab, callback) { callback?.(); },
     GM_registerMenuCommand() {}, GM_openInTab() {}, addEventListener() {} };
@@ -230,4 +240,25 @@ test('worker refresh during fill or send waiting never reopens a job or repeats 
     assert.equal(events.includes('contact'), false); assert.equal(events.includes('fill'), false);
     assert.equal(events.includes('send'), false); assert.equal(events.some(x => x.startsWith('navigate:')), false);
   }
+});
+
+
+test('a background-delayed worker re-elects before sending instead of reporting task stopped', async () => {
+  const r = await run({ fillDelay: 1000, freezeDuringDelay: true });
+  assert.equal(r.result.ok, true); assert.equal(r.result.data.confirmed, true);
+  assert.equal(r.events.filter(e => e === 'send').length, 1); assert.ok(r.events.includes('freeze'));
+});
+
+test('a competing worker prevents sending and returns a precise local error', async () => {
+  const r = await run({ fillDelay: 1000, freezeDuringDelay: true, competingWorker: true });
+  assert.equal(r.result.ok, false); assert.equal(r.result.code, 'WORKER_LEASE_UNAVAILABLE');
+  assert.equal(r.events.includes('send'), false); assert.equal(r.events.includes('fill'), false);
+});
+
+
+test('a two-second send delay completes after one late callback instead of multiplying the wait', async () => {
+  const r = await run({ sendDelay: 2000, slowWait: 5000 });
+  assert.equal(r.result.ok, true); assert.equal(r.result.data.confirmed, true);
+  assert.equal(r.events.filter(e => e === 'slowWait').length, 1);
+  assert.equal(r.events.filter(e => e === 'send').length, 1);
 });

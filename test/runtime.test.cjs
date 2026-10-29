@@ -16,7 +16,7 @@ function runtime(overrides = {}, shared = null, clockOffset = 0) {
     sessionStorage: { getItem() { return null; } },
     GM_getValue: (k, fallback = null) => store.has(k) ? structuredClone(store.get(k)) : fallback,
     GM_setValue: (k, v) => store.set(k, structuredClone(v)), GM_deleteValue: k => store.delete(k), GM_listValues: () => [...store.keys()],
-    setTimeout: (fn, ms) => setTimeout(fn, ms === 500 ? 0 : ms), clearTimeout, document: {}, console };
+    setTimeout: (fn, ms) => setTimeout(() => { if (ms === 500) { now += ms; context.module.exports.renewLease(); } fn(); }, ms === 500 ? 0 : ms), clearTimeout, document: {}, console };
   vm.runInNewContext(source, context);
   const api = context.module.exports;
   api.renewLease(); now += 2000; api.renewLease();
@@ -24,7 +24,7 @@ function runtime(overrides = {}, shared = null, clockOffset = 0) {
 }
 
 function quickRetryTimers(r) {
-  r.context.setTimeout = (fn, ms) => setTimeout(fn, ms === 500 || ms === 1000 || ms === 2000 ? 0 : ms);
+  r.context.setTimeout = (fn, ms) => setTimeout(() => { if (ms === 500) r.advance(ms); fn(); }, ms === 500 || ms === 1000 || ms === 2000 ? 0 : ms);
 }
 
 test('debug report exposes only execution flags and a read-only DOM snapshot', () => {
@@ -331,7 +331,7 @@ test('starting a new task with old conversations reads a job before polling chat
 
 test('waiting status explains page registration, elapsed time and scan cooldown without private data', () => {
   const r = runtime(); r.api.start(); const taskId = r.state().task.id;
-  r.store.set('bossai.v1.command', { taskId, type: 'inspect', workerId: 'w', phase: 'detail', createdAt: r.context.Date.now() - 5000 });
+  r.store.set('bossai.v1.command', { taskId, type: 'inspect', workerId: 'w', phase: 'new', createdAt: r.context.Date.now() - 5000 });
   assert.match(r.api.currentActivity(), /读取职位详情.*5秒.*90秒.*等待后台工作页/);
   r.store.set('bossai.v1.workerRegistered.w', true); assert.equal(r.api.currentActivity().includes('等待后台工作页加载'), false);
   r.store.delete('bossai.v1.command'); r.state().task.nextScanAt = r.context.Date.now() + 10000;
@@ -957,4 +957,21 @@ test('next-job delay also starts after a contact finishes, not only before the s
   const entry = chatEntry(r, 'settled'); const item = { id: 'new-send', key: entry.key, kind: 'contact', payload: {} };
   r.state().outbox.push(item); r.api.settle(r.state(), item, { confirmed: true });
   assert.equal(r.state().task.nextScanAt, r.context.Date.now() + 31000);
+});
+
+
+test('worker lease loss skips the affected contact but keeps the main task running', async () => {
+  const r = runtime({ autoSend: true }); r.api.start(); const entry = chatEntry(r, 'lease-lost');
+  entry.status = 'eligible'; entry.taskId = r.state().task.id; entry.analysis = { greeting: '您好，我有项目经验' };
+  workerStub(r, () => ({ ok: false, code: 'WORKER_LEASE_UNAVAILABLE', error: '工作页执行权未能稳定，已跳过本次动作，不重新发送' }));
+  await r.api.pump(); assert.equal(r.state().task.status, 'running');
+  assert.equal(r.state().entries[entry.key].handoff, true);
+});
+
+
+test('delayed browser callbacks count their real elapsed time rather than repeating nominal chunks', async () => {
+  const r = runtime(); let ticks = 0, guards = 0;
+  r.context.setTimeout = fn => { ticks++; r.advance(5000); queueMicrotask(fn); };
+  await r.api.guardedDelay(2000, () => { guards++; });
+  assert.equal(ticks, 1); assert.equal(guards, 2);
 });

@@ -1,6 +1,6 @@
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.45';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.47';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -343,10 +343,11 @@
     result.greeting = C.greetingMessage(result.greeting, c.resume, job); return result;
   }
   async function guardedDelay(ms, guard) {
-    // Short chunks keep manual stop, the schedule, and execution ownership active.
-    guard();
-    for (let remaining = ms; remaining > 0;) {
-      const chunk = Math.min(500, remaining); await sleep(chunk); remaining -= chunk; guard();
+    const deadline = Date.now() + Math.max(0, ms);
+    await guard();
+    while (Date.now() < deadline) {
+      await sleep(Math.min(500, deadline - Date.now()));
+      await guard();
     }
   }
   async function command(type, args, taskId, sendId = null) {
@@ -467,10 +468,12 @@
     log(s, entry.note); persist(s);
   }
   function globalFailure(error) {
+    if (['COMMAND_CANCELLED', 'COMMAND_EXPIRED', 'TASK_ENDED', 'TASK_OWNER_CHANGED', 'WORKER_LEASE_UNAVAILABLE'].includes(error.code)) return false;
     return error.code === 'PAGE_HEALTH' && error.healthIssue?.kind !== 'transient' || error.code === 'AI_RETRY_EXHAUSTED' || /检测到登录、验证或平台限制|尚未关闭|关闭未确认|未返回可关闭|执行权|工作指令过期|没有有效的发送预约|拒绝导航/.test(error.message);
   }
   function resultError(result) {
     const error = new Error(result.error);
+    if (result.code) error.code = result.code;
     if (result.healthIssue) { error.code = 'PAGE_HEALTH'; error.healthIssue = result.healthIssue; }
     return error;
   }
@@ -753,12 +756,30 @@
   }
   function workerGuard(cmd, sending = false, checkHealth = true) {
     const s = state(), c = config(), active = get('command');
-    if (get('cancel.' + cmd.id) || get('stopRequest') || !active || active.id !== cmd.id ||
-      cmd.owner !== winner() || s.task?.leaseToken !== cmd.owner || s.task?.id !== cmd.taskId ||
-      !C.allowed(s, c, Date.now()) || Date.now() - cmd.createdAt > (cmd.timeoutMs || 90000) || !workerOwns()) throw new Error('工作指令过期或任务已停止');
+    const failGuard = (code, message) => { const error = new Error(message); error.code = code; throw error; };
+    if (get('cancel.' + cmd.id) || !active || active.id !== cmd.id) failGuard('COMMAND_CANCELLED', '当前工作指令已取消或被替换');
+    if (get('stopRequest') || !C.allowed(s, c, Date.now())) failGuard('TASK_ENDED', '任务已停止或已到停止时间');
+    if (s.task?.id !== cmd.taskId || cmd.owner !== winner() || s.task?.leaseToken !== cmd.owner)
+      failGuard('TASK_OWNER_CHANGED', '主任务执行权变化，本次工作指令已取消');
+    if (Date.now() - cmd.createdAt > (cmd.timeoutMs || 90000))
+      failGuard('COMMAND_EXPIRED', `工作指令超过${Math.ceil((cmd.timeoutMs || 90000) / 1000)}秒，当前阶段：${cmd.phase || '未知'}`);
+    if (!workerOwns()) failGuard('WORKER_LEASE_PENDING', '工作页执行权正在重新确认');
     if (sending && (!c.autoSend || !s.outbox.some(x => x.id === cmd.sendId && x.status === 'pending' && x.taskId === cmd.taskId))) throw new Error('没有有效的发送预约');
     if (checkHealth) new Adapter(document, c.profile).health();
     return c;
+  }
+  async function stableWorkerGuard(cmd, sending = false) {
+    for (let attempt = 0; attempt <= 8; attempt++) {
+      try { return workerGuard(cmd, sending); }
+      catch (error) {
+        if (error.code !== 'WORKER_LEASE_PENDING') throw error;
+        if (attempt === 8) {
+          const unavailable = new Error('工作页执行权未能稳定，已跳过本次动作，不重新发送');
+          unavailable.code = 'WORKER_LEASE_UNAVAILABLE'; throw unavailable;
+        }
+        await sleep(500);
+      }
+    }
   }
   function workerPhase(cmd, phase, extra = {}) { Object.assign(cmd, extra, { phase }); put('command', cmd); }
   function sendStage(cmd, stage) {
@@ -769,13 +790,13 @@
     workerGuard(cmd); location.assign(url.href);
   }
   function workerFinish(cmd, data, error) {
-    put('result.' + cmd.id, error ? { ok: false, error: error.message || error,
+    put('result.' + cmd.id, error ? { ok: false, error: error.message || error, ...(error.code ? { code: error.code } : {}),
       ...(error.healthIssue ? { healthIssue: error.healthIssue } : {}) } : { ok: true, data });
     closeWorkerSelf();
   }
   async function verifyReceipt(adapter, cmd, before, expectedText) {
     for (let i = 0; i < 12; i++) {
-      await sleep(400); workerGuard(cmd, true); adapter.assertChatReady();
+      await sleep(400); await stableWorkerGuard(cmd, true); adapter.assertChatReady();
       const history = adapter.history(cmd.args.job);
       if (history.some(m => !before.includes(m.id) && C.receiptMatches(m, expectedText))) return true;
     }
@@ -850,29 +871,32 @@
       const text = C.greetingMessage(cmd.args.text, c.resume, job);
       if (!text || C.sensitive(text)) throw new Error('消息为空或涉及关键事项');
       const before = history.map(m => m.id);
-      workerPhase(cmd, 'waitingFill');
-      await guardedDelay(cmd.fillDelay || 0, () => workerGuard(cmd, true));
+      workerPhase(cmd, 'waitingFill', { waitUntil: Date.now() + (cmd.fillDelay || 0) });
+      await guardedDelay(cmd.fillDelay || 0, () => stableWorkerGuard(cmd, true));
       adapter.assertChatReady();
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id) throw new Error('等待填入期间会话发生变化，取消旧消息');
       sendStage(cmd, 'drafting');
       adapter.fill(text); await sleep(150);
       // Allow a bounded UI render delay; never rewrite the draft or retry a send.
       for (let i = 0; i < 5 && !adapter.editorMatches(text); i++) {
-        workerGuard(cmd, true); await sleep(100);
+        await stableWorkerGuard(cmd, true); await sleep(100);
       }
-      workerGuard(cmd, true); adapter.assertChatReady();
+      await stableWorkerGuard(cmd, true); adapter.assertChatReady();
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id) throw new Error('填写期间会话发生变化，草稿留待人工处理');
       if (!adapter.editorMatches(text)) throw new Error('输入框内容与拟发送消息不一致，取消发送（已等待编辑器同步，草稿保留；请核对换行或网页是否改写内容）');
-      workerPhase(cmd, 'waitingSend');
-      await guardedDelay(cmd.sendDelay || 0, () => workerGuard(cmd, true));
+      workerPhase(cmd, 'waitingSend', { waitUntil: Date.now() + (cmd.sendDelay || 0) });
+      await guardedDelay(cmd.sendDelay || 0, () => stableWorkerGuard(cmd, true));
       adapter.assertChatReady();
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id || !adapter.editorMatches(text)) throw new Error('等待发送期间会话或草稿发生变化，取消发送');
       const send = adapter.button(adapter.p.send);
-      sendStage(cmd, 'clicked'); put('consumed.' + cmd.id, true); workerGuard(cmd, true); send.click();
+      await stableWorkerGuard(cmd, true);
+      if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id || !adapter.editorMatches(text)) throw new Error('发送前消息记录或草稿变化，取消发送');
+      sendStage(cmd, 'clicked'); put('consumed.' + cmd.id, true); send.click();
       const confirmed = await verifyReceipt(adapter, cmd, before, text);
       if (confirmed) sendStage(cmd, 'confirmed');
       workerFinish(cmd, { confirmed, reason: confirmed ? '' : '消息发送回执未确认' });
     } catch (e) {
+      if (e.code === 'WORKER_LEASE_PENDING') return;
       if (e.code === 'PAGE_HEALTH' && !get('consumed.' + cmd.id)) {
         const now = Date.now(), kind = e.healthIssue.kind;
         if (!cmd.healthCheck || cmd.healthCheck.kind !== kind) {
@@ -1110,8 +1134,9 @@
       const labels = { inspect: '读取职位详情', contact: '首聊流程', openOnly: '仅打开沟通' };
       const elapsed = Math.max(0, Math.floor((Date.now() - cmd.createdAt) / 1000));
       const phases = { new: '载入工作页', detail: '载入详情', opening: '打开目标会话', chat: '读取聊天', waitingFill: '等待填入招呼', waitingSend: '填入后等待发送' };
-      return (cmd.healthCheck ? '页面异常自动复查中 · ' : '') + `当前动作：${labels[cmd.type] || '页面操作'} · ${phases[cmd.phase] || cmd.phase} · 已等待${elapsed}秒 / 上限${Math.ceil((cmd.timeoutMs || 90000) / 1000)}秒` +
-        (get('workerRegistered.' + cmd.workerId) ? '' : ' · 等待后台工作页加载并注册脚本');
+      const stageWait = ['waitingFill', 'waitingSend'].includes(cmd.phase) ? ` · 本阶段计划${Math.ceil((cmd.phase === 'waitingFill' ? cmd.fillDelay || 0 : cmd.sendDelay || 0) / 1000)}秒（含随机延迟），剩余约${Math.max(0, Math.ceil(((cmd.waitUntil || Date.now()) - Date.now()) / 1000))}秒` : '';
+      return (cmd.healthCheck ? '页面异常自动复查中 · ' : '') + `当前动作：${labels[cmd.type] || '页面操作'} · ${phases[cmd.phase] || cmd.phase} · 已等待${elapsed}秒 / 上限${Math.ceil((cmd.timeoutMs || 90000) / 1000)}秒（整个流程）` + stageWait +
+        (cmd.phase !== 'new' || get('workerRegistered.' + cmd.workerId) ? '' : ' · 等待后台工作页加载并注册脚本');
     }
     if (busy) return '当前动作：正在处理任务；若正在重试，请查看运行记录';
     const retries = Object.values(s.entries).filter(e => e.retry?.taskId === s.task.id && !e.handoff);
@@ -1158,7 +1183,7 @@
     q('logs').textContent = s.logs.slice(0, 30).map(x => fmt(x.at) + ' ' + x.message).join('\n'); q('logs').style.whiteSpace = 'pre-wrap';
   }
   if (typeof module === 'object' && module.exports) {
-    module.exports = { renewLease, releaseLease, start, requestStart, stop, pump, analyze, testConnection, approveContactRetry, settle, requestAI, command, closeManagedWorker, clearWorkerBlock, disableAutoSend, requestClearActivity, completeClearActivity, quarantinePending, currentActivity, generateResume, maintainRuntime, debugReport }; return;
+    module.exports = { guardedDelay, renewLease, releaseLease, start, requestStart, stop, pump, analyze, testConnection, approveContactRetry, settle, requestAI, command, closeManagedWorker, clearWorkerBlock, disableAutoSend, requestClearActivity, completeClearActivity, quarantinePending, currentActivity, generateResume, maintainRuntime, debugReport }; return;
   }
   refreshDebugTools(); setInterval(refreshDebugTools, 1000);
   if (workerId) {
