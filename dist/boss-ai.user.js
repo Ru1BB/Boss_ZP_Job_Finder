@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS AI 求职助手
 // @namespace    local.boss-ai
-// @version      0.2.1
+// @version      0.2.2
 // @updateURL    https://7355608.site/userscripts/boss-ai.meta.js
 // @downloadURL  https://7355608.site/userscripts/boss-ai.user.js
 // @description  AI 职位筛选、受控沟通与北京时间调度；请先校准页面
@@ -1178,7 +1178,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
 
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.1';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.2';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -1553,12 +1553,13 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     put('command', cmd);
     const labels = { inspect: '读取职位详情', contact: '发送首条招呼', openOnly: '仅打开沟通' };
     const label = labels[type] || '页面操作';
-    const progress = state(); log(progress, '开始' + label + '，等待后台工作页'); persist(progress);
+    const progress = state(); log(progress, '开始' + label + (type === 'contact' ? '，打开前台工作页执行发送' : '，等待后台工作页')); persist(progress);
     let handle;
     try {
       const url = new URL(args.job?.url || s.task.searchUrl);
       url.hash = new URLSearchParams({ bossaiWorker: wid }).toString();
-      handle = workerTab = GM_openInTab(url.href, { active: false, insert: true, setParent: true }); workerTabId = wid;
+      // BOSS's chat/editor needs an active page; leave read-only inspection in the background.
+      handle = workerTab = GM_openInTab(url.href, { active: type === 'contact', insert: true, setParent: true }); workerTabId = wid;
       if (!handle || typeof handle.close !== 'function') throw new Error('油猴未返回可关闭的工作页句柄');
       handle.onclose = () => put('workerClosed.' + wid, true);
       const expires = cmd.createdAt + cmd.timeoutMs;
@@ -1955,6 +1956,11 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     if (Date.now() - cmd.createdAt > (cmd.timeoutMs || 90000))
       failGuard('COMMAND_EXPIRED', `工作指令超过${Math.ceil((cmd.timeoutMs || 90000) / 1000)}秒，当前阶段：${cmd.phase || '未知'}`);
     if (!workerOwns()) failGuard('WORKER_LEASE_PENDING', '工作页执行权正在重新确认');
+    // The active sender may keep its existing main owner's lease alive while the
+    // search tab is backgrounded. Never recreate an expired or transferred lease.
+    const mainClaim = get('lease.' + cmd.owner);
+    if (cmd.type === 'contact' && mainClaim?.expires > Date.now())
+      put('lease.' + cmd.owner, { ...mainClaim, expires: Math.max(mainClaim.expires, Date.now() + 15000) });
     if (sending && (!c.autoSend || !s.outbox.some(x => x.id === cmd.sendId && x.status === 'pending' && x.taskId === cmd.taskId))) throw new Error('没有有效的发送预约');
     if (checkHealth) new Adapter(document, c.profile).health();
     return c;
@@ -2341,7 +2347,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       const phases = { new: '载入工作页', detail: '载入详情', opening: '打开目标会话', chat: '读取聊天', waitingFill: '等待填入招呼', waitingSend: '填入后等待发送', checkingFill: '等待已结束，检查填入条件', drafting: '填写及同步编辑器', checkingSend: '等待已结束，检查发送条件', locatingSend: '定位发送按钮', clickingSend: '准备点击发送', verifyingReceipt: '已点击发送，核对回执', receiptDone: '回执检查完成' };
       const stageWait = ['waitingFill', 'waitingSend'].includes(cmd.phase) ? ` · 本阶段计划${Math.ceil((cmd.phase === 'waitingFill' ? cmd.fillDelay || 0 : cmd.sendDelay || 0) / 1000)}秒（含随机延迟），剩余约${Math.max(0, Math.ceil(((cmd.waitUntil || Date.now()) - Date.now()) / 1000))}秒${Date.now() > (cmd.waitUntil || Date.now()) + 5000 ? ' · 倒计时已到，尚未收到工作页继续执行的进度，可能存在后台延迟' : ''}` : '';
       return (cmd.healthCheck ? '页面异常自动复查中 · ' : '') + `当前动作：${labels[cmd.type] || '页面操作'} · ${phases[cmd.phase] || cmd.phase} · 已等待${elapsed}秒 / 上限${Math.ceil((cmd.timeoutMs || 90000) / 1000)}秒（整个流程）` + stageWait +
-        (cmd.phase !== 'new' || get('workerRegistered.' + cmd.workerId) ? '' : ' · 等待后台工作页加载并注册脚本');
+        (cmd.phase !== 'new' || get('workerRegistered.' + cmd.workerId) ? '' : cmd.type === 'contact' ? ' · 等待前台发送工作页加载并注册脚本' : ' · 等待后台工作页加载并注册脚本');
     }
     if (busy) return '当前动作：正在处理任务；若正在重试，请查看运行记录';
     const retries = Object.values(s.entries).filter(e => e.retry?.taskId === s.task.id && !e.handoff);

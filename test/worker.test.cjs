@@ -56,6 +56,7 @@ async function run(options = {}) {
   if (options.consumed) store.set('bossai.v1.consumed.cmd', true);
   if (options.retired) store.set('bossai.v1.workerRetired.worker', { at: now });
   if (options.expired) s.task.endAt = now - 1;
+  if (options.expiredMain) store.set('bossai.v1.lease.leader', { owner: 'leader', claimedAt: now - 20000, expires: now - 1 });
   let offset = 0;
   class Clock extends Date { static now() { return now + offset; } }
   const context = { BossCore: C, BossAdapter: { Adapter: FakeAdapter, DEFAULT_PROFILE: p },
@@ -110,6 +111,21 @@ test('failed receipt diagnostics never report success or repeat the click', asyn
   assert.equal(r.result.data.confirmed, false);
   assert.match(r.store.get('bossai.v1.command').progress.at(-1).message, /未确认/);
   assert.equal(r.events.filter(x => x === 'send').length, 1);
+});
+
+test('foreground sender maintains a live main lease across long action waits', async () => {
+  const r = await run({ fillDelay: 40000, sendDelay: 40000 });
+  assert.equal(r.result.data.confirmed, true);
+  const cmd = r.store.get('bossai.v1.command');
+  assert.ok(r.store.get('bossai.v1.lease.leader').expires > cmd.createdAt + 80000);
+  assert.equal(r.events.filter(x => x === 'send').length, 1);
+});
+
+test('sender never resurrects an expired main lease', async () => {
+  const r = await run({ expiredMain: true });
+  assert.equal(r.events.includes('send'), false);
+  assert.equal(r.result.code, 'TASK_OWNER_CHANGED');
+  assert.ok(r.store.get('bossai.v1.lease.leader').expires < r.store.get('bossai.v1.command').createdAt);
 });
 
 test('retired late-loading workers cannot send and close attempts remain bounded', async () => {

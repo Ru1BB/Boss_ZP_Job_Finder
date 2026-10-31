@@ -686,6 +686,23 @@ test('page commands close owned tabs before another page is opened', async () =>
   }
   assert.equal(opened.length, 3); assert.ok(opened.every(tab => tab.closed));
 });
+test('first contact opens in foreground while inspection stays in background', async () => {
+  const r = runtime(); r.api.start();
+  const options = [];
+  r.context.GM_getTabs = callback => callback({});
+  r.context.GM_openInTab = (url, setting) => {
+    options.push(setting);
+    const cmd = r.store.get('bossai.v1.command');
+    r.store.set('bossai.v1.result.' + cmd.id, { ok: true, data: {} });
+    return { closed: false, close() { this.closed = true; } };
+  };
+  for (const type of ['inspect', 'contact'])
+    await r.api.command(type, { job: { url: 'https://www.zhipin.com/job_detail/test.html' } }, r.state().task.id);
+  assert.equal(options[0].active, false);
+  assert.equal(options[1].active, true);
+  assert.equal(options[1].setParent, true);
+});
+
 test('failed page commands also close their own tabs', async () => {
   const r = runtime(); r.api.start(); let closed = false;
   r.context.GM_getTabs = callback => callback({});
