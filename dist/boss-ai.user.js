@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS AI 求职助手
 // @namespace    local.boss-ai
-// @version      0.2.2
+// @version      0.2.3
 // @updateURL    https://7355608.site/userscripts/boss-ai.meta.js
 // @downloadURL  https://7355608.site/userscripts/boss-ai.user.js
 // @description  AI 职位筛选、受控沟通与北京时间调度；请先校准页面
@@ -16,6 +16,7 @@
 // @grant        GM_saveTab
 // @grant        GM_getTabs
 // @grant        window.close
+// @grant        window.focus
 // @grant        GM_registerMenuCommand
 // @connect      maas.qianwenaiapi.com
 // @connect      api.deepseek.com
@@ -1178,7 +1179,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
 
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.2';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.3';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -1553,13 +1554,13 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     put('command', cmd);
     const labels = { inspect: '读取职位详情', contact: '发送首条招呼', openOnly: '仅打开沟通' };
     const label = labels[type] || '页面操作';
-    const progress = state(); log(progress, '开始' + label + (type === 'contact' ? '，打开前台工作页执行发送' : '，等待后台工作页')); persist(progress);
+    const progress = state(); log(progress, '开始' + label + '，等待后台工作页'); persist(progress);
     let handle;
     try {
       const url = new URL(args.job?.url || s.task.searchUrl);
       url.hash = new URLSearchParams({ bossaiWorker: wid }).toString();
-      // BOSS's chat/editor needs an active page; leave read-only inspection in the background.
-      handle = workerTab = GM_openInTab(url.href, { active: type === 'contact', insert: true, setParent: true }); workerTabId = wid;
+      // Keep preparation in the background; the worker focuses itself only before sending.
+      handle = workerTab = GM_openInTab(url.href, { active: false, insert: true, setParent: true }); workerTabId = wid;
       if (!handle || typeof handle.close !== 'function') throw new Error('油猴未返回可关闭的工作页句柄');
       handle.onclose = () => put('workerClosed.' + wid, true);
       const expires = cmd.createdAt + cmd.timeoutMs;
@@ -2028,7 +2029,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       if (get('consumed.' + cmd.id)) {
         workerFinish(cmd, { confirmed: false, reason: '发送操作已执行过但确认中断，请人工核对' }); return;
       }
-      if (['waitingFill', 'waitingSend', 'checkingFill', 'drafting', 'checkingSend', 'locatingSend', 'clickingSend'].includes(cmd.phase)) throw new Error('等待期间工作页已重载，已取消本次动作，请人工核对；不会重新点击沟通或发送');
+      if (['waitingFill', 'waitingSend', 'checkingFill', 'drafting', 'checkingSend', 'focusingSend', 'locatingSend', 'clickingSend'].includes(cmd.phase)) throw new Error('等待期间工作页已重载，已取消本次动作，请人工核对；不会重新点击沟通或发送');
       if (cmd.type === 'openOnly') {
         if (!c.openRejected || !c.verifiedEmptyContact) throw new Error('尚未确认立即沟通不会自动发送平台招呼，跳过');
         if (adapter.jobId(location.href) !== job.jobId) { navigateWorker(cmd, job.url); return; }
@@ -2093,6 +2094,14 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       workerPhase(cmd, 'waitingSend', { waitUntil: Date.now() + (cmd.sendDelay || 0) });
       await guardedDelay(cmd.sendDelay || 0, () => stableWorkerGuard(cmd, true),
         () => workerProgress(cmd, 'checkingSend', '发送前等待已结束，开始检查执行权、聊天记录和草稿'));
+      workerProgress(cmd, 'focusingSend', '准备发送，正在切换消息工作页到前台');
+      await stableWorkerGuard(cmd, true);
+      window.focus();
+      const focusDeadline = Date.now() + 5000;
+      while (document.hidden && Date.now() < focusDeadline) {
+        await sleep(500); await stableWorkerGuard(cmd, true);
+      }
+      if (document.hidden) throw new Error('消息工作页未能切换到前台，已取消发送并保留草稿');
       adapter.assertChatReady();
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id || !adapter.editorMatches(text)) throw new Error('等待发送期间会话或草稿发生变化，取消发送');
       workerProgress(cmd, 'locatingSend', '聊天记录和草稿检查通过，正在定位发送按钮');
@@ -2344,10 +2353,10 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     if (cmd?.taskId === s.task.id) {
       const labels = { inspect: '读取职位详情', contact: '首聊流程', openOnly: '仅打开沟通' };
       const elapsed = Math.max(0, Math.floor((Date.now() - cmd.createdAt) / 1000));
-      const phases = { new: '载入工作页', detail: '载入详情', opening: '打开目标会话', chat: '读取聊天', waitingFill: '等待填入招呼', waitingSend: '填入后等待发送', checkingFill: '等待已结束，检查填入条件', drafting: '填写及同步编辑器', checkingSend: '等待已结束，检查发送条件', locatingSend: '定位发送按钮', clickingSend: '准备点击发送', verifyingReceipt: '已点击发送，核对回执', receiptDone: '回执检查完成' };
+      const phases = { new: '载入工作页', detail: '载入详情', opening: '打开目标会话', chat: '读取聊天', waitingFill: '等待填入招呼', waitingSend: '填入后等待发送', checkingFill: '等待已结束，检查填入条件', drafting: '填写及同步编辑器', checkingSend: '等待已结束，检查发送条件', focusingSend: '发送前切换消息页到前台', locatingSend: '定位发送按钮', clickingSend: '准备点击发送', verifyingReceipt: '已点击发送，核对回执', receiptDone: '回执检查完成' };
       const stageWait = ['waitingFill', 'waitingSend'].includes(cmd.phase) ? ` · 本阶段计划${Math.ceil((cmd.phase === 'waitingFill' ? cmd.fillDelay || 0 : cmd.sendDelay || 0) / 1000)}秒（含随机延迟），剩余约${Math.max(0, Math.ceil(((cmd.waitUntil || Date.now()) - Date.now()) / 1000))}秒${Date.now() > (cmd.waitUntil || Date.now()) + 5000 ? ' · 倒计时已到，尚未收到工作页继续执行的进度，可能存在后台延迟' : ''}` : '';
       return (cmd.healthCheck ? '页面异常自动复查中 · ' : '') + `当前动作：${labels[cmd.type] || '页面操作'} · ${phases[cmd.phase] || cmd.phase} · 已等待${elapsed}秒 / 上限${Math.ceil((cmd.timeoutMs || 90000) / 1000)}秒（整个流程）` + stageWait +
-        (cmd.phase !== 'new' || get('workerRegistered.' + cmd.workerId) ? '' : cmd.type === 'contact' ? ' · 等待前台发送工作页加载并注册脚本' : ' · 等待后台工作页加载并注册脚本');
+        (cmd.phase !== 'new' || get('workerRegistered.' + cmd.workerId) ? '' : ' · 等待后台工作页加载并注册脚本');
     }
     if (busy) return '当前动作：正在处理任务；若正在重试，请查看运行记录';
     const retries = Object.values(s.entries).filter(e => e.retry?.taskId === s.task.id && !e.handoff);

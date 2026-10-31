@@ -63,7 +63,7 @@ async function run(options = {}) {
     crypto: require('node:crypto').webcrypto, URL, URLSearchParams, Date: Clock, console,
     sessionStorage: { getItem: () => 'worker', setItem() {} },
     location: { href: 'https://www.zhipin.com/web/geek/chat', hash: '', reload() { events.push('reloadWorker'); }, assign(url) { events.push('navigate:' + url); } },
-    document: { createElement: () => ({ style: {} }), documentElement: { append() {} } },
+    document: { hidden: !!options.hidden, createElement: () => ({ style: {} }), documentElement: { append() {} } },
     GM_getValue: (k, fallback = null) => store.has(k) ? structuredClone(store.get(k)) : fallback,
     GM_setValue: (k, v) => store.set(k, structuredClone(v)), GM_listValues: () => [...store.keys()], GM_deleteValue: k => store.delete(k),
     setInterval: f => callbacks.push(f), setTimeout: (f, ms) => {
@@ -77,7 +77,7 @@ async function run(options = {}) {
       }
       f();
     }, Event: class {},
-    window: { close() { events.push('closeWorker'); if (options.closeThrows) throw new Error('close failed'); } },
+    window: { focus() { events.push('focus'); if (!options.focusFails) context.document.hidden = false; if (options.stopOnFocus) store.set('bossai.v1.stopRequest', { manual: true }); }, close() { events.push('closeWorker'); if (options.closeThrows) throw new Error('close failed'); } },
     GM_getTab: callback => callback({}), GM_saveTab(tab, callback) { callback?.(); },
     GM_registerMenuCommand() {}, GM_openInTab() {}, addEventListener() {} };
   vm.runInNewContext(source, context);
@@ -97,12 +97,12 @@ test('first-contact diagnostics distinguish elapsed waits, click and confirmed r
   assert.equal(r.result.ok, true);
   assert.equal(r.result.data.confirmed, true);
   const progress = r.store.get('bossai.v1.command').progress.map(x => x.message);
-  assert.equal(progress.length, 7);
+  assert.equal(progress.length, 8);
   assert.match(progress[0], /填入前等待已结束/);
   assert.match(progress[2], /发送前等待已结束/);
-  assert.match(progress[4], /准备点击发送/);
-  assert.match(progress[5], /已执行点击发送/);
-  assert.match(progress[6], /回执确认成功/);
+  assert.match(progress[5], /准备点击发送/);
+  assert.match(progress[6], /已执行点击发送/);
+  assert.match(progress[7], /回执确认成功/);
   assert.equal(r.events.filter(x => x === 'send').length, 1);
 });
 
@@ -298,4 +298,19 @@ test('a two-second send delay completes after one late callback instead of multi
   assert.equal(r.result.ok, true); assert.equal(r.result.data.confirmed, true);
   assert.equal(r.events.filter(e => e === 'slowWait').length, 1);
   assert.equal(r.events.filter(e => e === 'send').length, 1);
+});
+
+test('focus occurs only after drafting and before the send click', async () => {
+  const r = await run({ hidden: true, fillDelay: 1000, sendDelay: 1000 });
+  assert.equal(r.result.data.confirmed, true);
+  assert.ok(r.events.indexOf('fill') < r.events.indexOf('focus'));
+  assert.ok(r.events.indexOf('focus') < r.events.indexOf('send'));
+  assert.equal(r.events.filter(x => x === 'focus').length, 1);
+});
+test('failed focus or stop during focus prevents sending', async () => {
+  for (const options of [{ hidden: true, focusFails: true }, { hidden: true, stopOnFocus: true }]) {
+    const r = await run(options);
+    assert.equal(r.events.includes('send'), false);
+    assert.equal(r.result.ok, false);
+  }
 });

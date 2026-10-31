@@ -686,7 +686,7 @@ test('page commands close owned tabs before another page is opened', async () =>
   }
   assert.equal(opened.length, 3); assert.ok(opened.every(tab => tab.closed));
 });
-test('first contact opens in foreground while inspection stays in background', async () => {
+test('first contact preparation and inspection both open in background', async () => {
   const r = runtime(); r.api.start();
   const options = [];
   r.context.GM_getTabs = callback => callback({});
@@ -699,7 +699,7 @@ test('first contact opens in foreground while inspection stays in background', a
   for (const type of ['inspect', 'contact'])
     await r.api.command(type, { job: { url: 'https://www.zhipin.com/job_detail/test.html' } }, r.state().task.id);
   assert.equal(options[0].active, false);
-  assert.equal(options[1].active, true);
+  assert.equal(options[1].active, false);
   assert.equal(options[1].setParent, true);
 });
 

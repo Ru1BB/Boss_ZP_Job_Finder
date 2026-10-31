@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS AI 求职助手
 // @namespace    local.boss-ai
-// @version      0.2.2
+// @version      0.2.3
 // @updateURL    https://7355608.site/userscripts/boss-ai.meta.js
 // @downloadURL  https://7355608.site/userscripts/boss-ai.user.js
 // @description  AI 职位筛选、受控沟通与北京时间调度；请先校准页面
@@ -16,6 +16,7 @@
 // @grant        GM_saveTab
 // @grant        GM_getTabs
 // @grant        window.close
+// @grant        window.focus
 // @grant        GM_registerMenuCommand
 // @connect      maas.qianwenaiapi.com
 // @connect      api.deepseek.com
