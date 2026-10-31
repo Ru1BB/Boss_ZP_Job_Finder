@@ -480,3 +480,11 @@ test('default adapter no longer exposes attachment or reply adaptation fields', 
     assert.equal(Object.hasOwn(P, key), false); assert.equal(Object.hasOwn(a.p, key), false);
   }
 });
+
+test('contact navigation accepts only explicit same-site chat links for the current job', () => {
+  const a = adapter();
+  const good = 'https://www.zhipin.com/web/geek/chat?jobId=job1&securityId=test';
+  assert.equal(a.contactChatUrl(element({ 'data-url': good }), { jobId: 'job1' }), good);
+  for (const href of ['/web/geek/chat', '/web/geek/chat?jobId=other', 'https://example.com/web/geek/chat?jobId=job1', 'javascript:void(0)'])
+    assert.equal(a.contactChatUrl(element({ href }), { jobId: 'job1' }), '');
+});

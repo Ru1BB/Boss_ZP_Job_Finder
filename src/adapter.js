@@ -176,6 +176,20 @@
         contactTargetJobId,
         alreadyContacted: /继续沟通|已沟通/.test(contactText) };
     }
+    contactChatUrl(button, job) {
+      // Only follow an explicit DOM link tied to this job; never guess chat parameters.
+      for (const attr of ['data-url', 'href']) {
+        const raw = button.getAttribute?.(attr);
+        if (!raw) continue;
+        try {
+          const url = new URL(raw, this.doc.location.href);
+          if (url.origin === 'https://www.zhipin.com' && !url.username && !url.password &&
+              url.pathname === '/web/geek/chat' && url.searchParams.get('jobId') === job.jobId)
+            return url.href;
+        } catch { /* javascript, malformed or unrelated links are not navigation targets */ }
+      }
+      return '';
+    }
     chatReady() {
       return !this.nodes(this.p.chatEmpty).length && !!(this.nodes(this.p.chatIdentity).length || this.nodes(this.p.chatHeader).length);
     }

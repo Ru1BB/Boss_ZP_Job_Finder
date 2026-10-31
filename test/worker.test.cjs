@@ -10,7 +10,7 @@ async function run(options = {}) {
   const c = { ...C.defaults(), autoSend: true, verifiedEmptyContact: !!options.verifiedEmptyContact, verifyChatWindow: options.verifyChatWindow !== false, resumeName: '测试简历.pdf', profile: { verifiedContact: true, firstContactOpensEmptyChat: true, verifiedReply: true, verifiedResume: true } };
   const s = C.emptyState(); s.task = C.createTask(c, now); s.task.leaseToken = 'leader';
   const cmd = { id: 'cmd', workerId: 'worker', taskId: s.task.id, sendId: 'send', owner: 'leader', createdAt: now,
-    fillDelay: options.fillDelay || 0, sendDelay: options.sendDelay || 0, type: options.type || 'contact', phase: options.phase || 'chat', args: { job, text: '您好，我有相关项目经验', historyTail: 'in1', inboundId: 'in1', resumeName: c.resumeName } };
+    fillDelay: options.fillDelay || 0, sendDelay: options.sendDelay || 0, type: options.type || 'contact', phase: options.phase || 'chat', contactChatUrl: options.contactChatUrl || '', args: { job, text: '您好，我有相关项目经验', historyTail: 'in1', inboundId: 'in1', resumeName: c.resumeName } };
   s.outbox.push({ id: 'send', status: 'pending', taskId: s.task.id });
   if (options.retryApproved) { cmd.args.retryApproved = true; s.entries[C.pair(job)] = { job, retryApproved: true }; }
   const history = options.history || (cmd.type === 'contact' ? [] : [{ id: 'in1', role: 'recruiter', text: '请发一份简历', rich: false }]);
@@ -49,6 +49,7 @@ async function run(options = {}) {
     }
     editor() { return { value: draft }; }
     editorMatches(text) { return !options.editorMismatch && ++editorReads > (options.editorDelayReads || 0) && draft === text; }
+    contactChatUrl() { return options.contactChatUrl || ''; }
     jobId() { return 'j'; }
     inspectJob() { return job; }
     safeUrl(url) { return new URL(url); }
@@ -64,7 +65,7 @@ async function run(options = {}) {
   const context = { BossCore: C, BossAdapter: { Adapter: FakeAdapter, DEFAULT_PROFILE: p },
     crypto: require('node:crypto').webcrypto, URL, URLSearchParams, Date: Clock, console,
     sessionStorage: { getItem: () => 'worker', setItem() {} },
-    location: { href: 'https://www.zhipin.com/web/geek/chat', hash: '', reload() { events.push('reloadWorker'); }, assign(url) { events.push('navigate:' + url); } },
+    location: { href: options.locationHref || 'https://www.zhipin.com/web/geek/chat', hash: '', reload() { events.push('reloadWorker'); }, assign(url) { events.push('navigate:' + url); } },
     document: { hidden: !!options.hidden, createElement: () => ({ style: {} }), documentElement: { append() {} } },
     GM_getValue: (k, fallback = null) => store.has(k) ? structuredClone(store.get(k)) : fallback,
     GM_setValue: (k, v) => store.set(k, structuredClone(v)), GM_listValues: () => [...store.keys()], GM_deleteValue: k => store.delete(k),
@@ -324,4 +325,21 @@ test('failed focus or stop during focus prevents sending', async () => {
     assert.equal(r.events.includes('send'), false);
     assert.equal(r.result.ok, false);
   }
+});
+
+test('opening never abandons the job for a generic empty chat page', async () => {
+  const r = await run({ phase: 'opening', locationHref: 'https://www.zhipin.com/job_detail/j.html', emptyChat: true, neverLoads: true, extraTicks: 3, tickMs: 14000 });
+  assert.equal(r.events.some(x => x.startsWith('navigate:')), false);
+  assert.match(r.result.error, /仍在岗位页/);
+  assert.equal(r.events.includes('contact'), false);
+});
+test('opening uses the explicit job chat URL once without dropping its parameters', async () => {
+  const url = 'https://www.zhipin.com/web/geek/chat?jobId=j&securityId=test-token';
+  const r = await run({ phase: 'opening', locationHref: 'https://www.zhipin.com/job_detail/j.html', contactChatUrl: url, emptyChat: true, neverLoads: true, extraTicks: 4, tickMs: 6000 });
+  const routes = r.events.filter(x => x.startsWith('navigate:'));
+  assert.equal(routes.length, 1);
+  const parsed = new URL(routes[0].slice('navigate:'.length));
+  assert.equal(parsed.searchParams.get('jobId'), 'j');
+  assert.equal(parsed.searchParams.get('securityId'), 'test-token');
+  assert.equal(r.events.includes('contact'), false);
 });

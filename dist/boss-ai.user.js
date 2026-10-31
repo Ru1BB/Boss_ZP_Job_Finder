@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS AI 求职助手
 // @namespace    local.boss-ai
-// @version      0.2.4
+// @version      0.2.5
 // @updateURL    https://7355608.site/userscripts/boss-ai.meta.js
 // @downloadURL  https://7355608.site/userscripts/boss-ai.user.js
 // @description  AI 职位筛选、受控沟通与北京时间调度；请先校准页面
@@ -820,6 +820,20 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
         contactTargetJobId,
         alreadyContacted: /继续沟通|已沟通/.test(contactText) };
     }
+    contactChatUrl(button, job) {
+      // Only follow an explicit DOM link tied to this job; never guess chat parameters.
+      for (const attr of ['data-url', 'href']) {
+        const raw = button.getAttribute?.(attr);
+        if (!raw) continue;
+        try {
+          const url = new URL(raw, this.doc.location.href);
+          if (url.origin === 'https://www.zhipin.com' && !url.username && !url.password &&
+              url.pathname === '/web/geek/chat' && url.searchParams.get('jobId') === job.jobId)
+            return url.href;
+        } catch { /* javascript, malformed or unrelated links are not navigation targets */ }
+      }
+      return '';
+    }
     chatReady() {
       return !this.nodes(this.p.chatEmpty).length && !!(this.nodes(this.p.chatIdentity).length || this.nodes(this.p.chatHeader).length);
     }
@@ -1179,7 +1193,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
 
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.4';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.5';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -2051,16 +2065,24 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
         if (C.pair(detail) !== C.pair(job) || C.hardFilter(detail, c).status !== 'pass') throw new Error('岗位身份或城市条件发生变化');
         if (detail.alreadyContacted) { workerFinish(cmd, { confirmed: false, existing: true, reason: '页面已有沟通，请手动处理；已移除招聘者列表查找' }); return; }
         const button = adapter.button(adapter.p.contact);
-        workerGuard(cmd, true); sendStage(cmd, 'opening'); workerPhase(cmd, 'opening', { openedAt: Date.now() }); button.click(); return;
+        const contactChatUrl = adapter.contactChatUrl(button, job);
+        if (button.tagName === 'A' && button.getAttribute('target') === '_blank') button.setAttribute('target', '_self');
+        workerGuard(cmd, true); sendStage(cmd, 'opening');
+        workerPhase(cmd, 'opening', { openedAt: Date.now(), contactChatUrl, contactNavigationUsed: false });
+        button.click(); return;
       }
       if (cmd.type === 'contact') {
         // If a default greeting was sent by BOSS, history detects it and prevents a second one.
         if (!adapter.chatReady()) {
           const elapsed = Date.now() - (cmd.openedAt || cmd.createdAt);
-          if (elapsed >= 30000) throw new Error('聊天窗口未自动展开；已移除招聘者列表查找，请手动处理该岗位');
-          if (new URL(location.href).pathname !== new URL(adapter.p.chatUrl).pathname) {
-            if (elapsed < 1500) return; // Allow the site's own navigation to finish first.
-            workerPhase(cmd, 'opening'); navigateWorker(cmd, adapter.p.chatUrl); return;
+          const onChatPage = new URL(location.href).pathname === new URL(adapter.p.chatUrl).pathname;
+          if (elapsed >= 30000) throw new Error(onChatPage ?
+            '聊天窗口未自动展开：已进入消息页但未识别到展开的会话；不重复点击沟通，请诊断该工作页' :
+            '聊天窗口未自动展开：点击立即沟通后仍在岗位页或其他页面；未取得可用的聊天跳转结果，请检查弹窗或沟通按钮');
+          if (!onChatPage && elapsed >= 5000 && cmd.contactChatUrl && !cmd.contactNavigationUsed) {
+            workerProgress(cmd, 'opening', '原页面未完成跳转，使用沟通按钮提供的岗位聊天链接进入（仅一次）');
+            workerPhase(cmd, 'opening', { contactNavigationUsed: true });
+            navigateWorker(cmd, cmd.contactChatUrl); return;
           }
           return;
         }
