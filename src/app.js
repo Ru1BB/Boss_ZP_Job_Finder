@@ -1,6 +1,6 @@
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.6';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.7';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -881,6 +881,28 @@
       if (cmd.type === 'contact') {
         // If a default greeting was sent by BOSS, history detects it and prevents a second one.
         if (!adapter.chatReady()) {
+          const popup = adapter.startChatPopup();
+          if (popup) {
+            if (cmd.popupContinuedAt) throw new Error('继续沟通后岗位弹窗再次出现，已停止该动作，不循环点击');
+            if (cmd.popupCloseAt) {
+              if (Date.now() - cmd.popupCloseAt >= 3000) throw new Error('岗位沟通弹窗关闭未生效，已保留现场交人工');
+              return;
+            }
+            await stableWorkerGuard(cmd, true);
+            workerPhase(cmd, 'opening', { popupCloseAt: Date.now() });
+            workerProgress(cmd, 'opening', '识别到岗位沟通弹窗，关闭一次后等待继续沟通；不在弹窗内发送');
+            popup.close.click(); return;
+          }
+          if (cmd.popupCloseAt && !cmd.popupContinuedAt) {
+            if (Date.now() - cmd.popupCloseAt < 300) return;
+            const button = adapter.continueContactButton(job);
+            await stableWorkerGuard(cmd, true);
+            const contactChatUrl = adapter.contactChatUrl(button, job);
+            if (button.tagName === 'A' && button.getAttribute('target') === '_blank') button.setAttribute('target', '_self');
+            workerPhase(cmd, 'opening', { popupContinuedAt: Date.now(), openedAt: Date.now(), contactChatUrl, contactNavigationUsed: false });
+            workerProgress(cmd, 'opening', '弹窗已关闭，点击当前岗位的继续沟通一次');
+            button.click(); return;
+          }
           const elapsed = Date.now() - (cmd.openedAt || cmd.createdAt);
           const onChatPage = new URL(location.href).pathname === new URL(adapter.p.chatUrl).pathname;
           if (!onChatPage && elapsed >= 5000 && !cmd.openingFocusAt) {

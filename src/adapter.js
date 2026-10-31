@@ -176,6 +176,32 @@
         contactTargetJobId,
         alreadyContacted: /继续沟通|已沟通/.test(contactText) };
     }
+    startChatPopup() {
+      const contents = this.nodes('.startchat-content');
+      if (!contents.length) return null;
+      if (contents.length !== 1) throw new Error('找到多个岗位沟通弹窗，无法唯一关闭');
+      const content = contents[0], editors = this.nodes('textarea.input-area', content);
+      if (editors.length !== 1) throw new Error('岗位沟通弹窗结构不明，未自动关闭');
+      if (String(editors[0].value || '').trim()) throw new Error('岗位沟通弹窗已有草稿，保留内容并交人工处理');
+      const dialog = content.closest('.dialog-con');
+      if (!dialog) throw new Error('岗位沟通弹窗缺少可识别的外层，未自动关闭');
+      const selector = '.icon-close, .dialog-close, .close-icon, .close, [aria-label="关闭"], [title="关闭"], [aria-label="Close"]';
+      let closes = this.nodes(selector, dialog).filter(n => !content.contains(n));
+      if (!closes.length && dialog.parentElement?.matches('.dialog-container, .dialog-wrap, .dialog-wrapper, [role="dialog"]'))
+        closes = this.nodes(selector, dialog.parentElement).filter(n => !content.contains(n));
+      if (closes.length !== 1) throw new Error('岗位沟通弹窗关闭按钮不唯一或未匹配，请提供弹窗关闭按钮诊断');
+      const close = closes[0];
+      if (close.disabled || close.getAttribute('aria-disabled') === 'true') throw new Error('岗位沟通弹窗关闭按钮不可用');
+      return { close };
+    }
+    continueContactButton(job) {
+      this.health();
+      if (this.jobId(this.doc.location.href) !== job.jobId) throw new Error('关闭弹窗后已离开当前岗位，取消继续沟通');
+      const button = this.button(this.p.contact);
+      if (String(button.innerText || button.textContent || '').replace(/\s/g, '') !== '继续沟通')
+        throw new Error('关闭弹窗后未找到继续沟通按钮，不重复点击立即沟通');
+      return button;
+    }
     contactChatUrl(button, job) {
       // Only follow an explicit DOM link tied to this job; never guess chat parameters.
       for (const attr of ['data-url', 'href']) {
@@ -392,6 +418,8 @@
       const sendCandidates = nodes('sendCandidates', 'button, [role="button"], a, span')
         .filter(n => /^发送$/.test((n.innerText || n.textContent || '').trim())).slice(0, 8).map(describe);
       const candidates = {
+        startChatPopups: capture('startChatPopups', '.startchat-content, .dialog-con'),
+        popupCloseControls: capture('popupCloseControls', '.dialog-con .icon-close, .dialog-con .dialog-close, .dialog-con .close, .dialog-wrap .icon-close, .dialog-wrap .dialog-close, .dialog-container .dialog-close, .dialog-con [aria-label="关闭"]'),
         chatContainers: capture('chatContainers', this.p.chatHeader),
         chatPositions: capture('chatPositions', '.chat-position-content, .chat-position-content .position-content'),
         editors: capture('editors', '[contenteditable="true"], textarea, [role="textbox"]'),

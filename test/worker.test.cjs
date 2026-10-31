@@ -27,6 +27,7 @@ async function run(options = {}) {
       }
     }
     chatReady() {
+      if (options.startPopup && events.includes('continue') && !options.popupReturns) return true;
       if (options.openAfterRecovery && events.includes('focus')) return true;
       return options.emptyChat ? events.includes('selectConversation') && !options.neverLoads : true;
     }
@@ -53,6 +54,14 @@ async function run(options = {}) {
     editor() { return { value: draft }; }
     editorMatches(text) { return !options.editorMismatch && ++editorReads > (options.editorDelayReads || 0) && draft === text; }
     contactChatUrl() { return options.contactChatUrl || ''; }
+    startChatPopup() {
+      if (!options.startPopup || events.includes('closePopup') && !options.popupStays && !(options.popupReturns && events.includes('continue'))) return null;
+      return { close: { click() { events.push('closePopup'); if (options.stopOnPopupClose) store.set('bossai.v1.stopRequest', { manual: true }); } } };
+    }
+    continueContactButton() {
+      if (options.continueMissing) throw new Error('未找到继续沟通按钮');
+      return { click() { events.push('continue'); } };
+    }
     jobId() { return 'j'; }
     inspectJob() { return job; }
     safeUrl(url) { return new URL(url); }
@@ -367,4 +376,29 @@ test('stop during recovery activation prevents any send', async () => {
   assert.equal(r.events.filter(x => x === 'focus').length, 1);
   assert.equal(r.events.includes('send'), false);
   assert.equal(r.events.includes('contact'), false);
+});
+
+test('inline start-chat popup is closed once and continue opens normal chat before sending', async () => {
+  const r = await run({ phase: 'opening', emptyChat: true, startPopup: true, extraTicks: 4 });
+  assert.equal(r.result.data.confirmed, true);
+  assert.equal(r.events.filter(x => x === 'closePopup').length, 1);
+  assert.equal(r.events.filter(x => x === 'continue').length, 1);
+  assert.ok(r.events.indexOf('closePopup') < r.events.indexOf('continue'));
+  assert.ok(r.events.indexOf('continue') < r.events.indexOf('fill'));
+  assert.equal(r.events.filter(x => x === 'send').length, 1);
+});
+test('popup failures and stop never trigger repeated close or continue clicks', async () => {
+  for (const extra of [{ popupStays: true }, { popupReturns: true }, { continueMissing: true }, { stopOnPopupClose: true }]) {
+    const r = await run({ phase: 'opening', emptyChat: true, startPopup: true, extraTicks: 6, ...extra });
+    assert.equal(r.events.filter(x => x === 'closePopup').length, 1);
+    assert.ok(r.events.filter(x => x === 'continue').length <= 1);
+    assert.equal(r.events.includes('send'), false);
+  }
+});
+test('platform greeting discovered after popup continuation still blocks another greeting', async () => {
+  const r = await run({ phase: 'opening', emptyChat: true, startPopup: true, extraTicks: 4,
+    history: [{ id: 'platform-1', role: 'candidate', text: '您好，期待沟通', rich: false }] });
+  assert.equal(r.result.data.notSent, true);
+  assert.equal(r.events.includes('fill'), false);
+  assert.equal(r.events.includes('send'), false);
 });
