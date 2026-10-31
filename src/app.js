@@ -1,6 +1,6 @@
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.7';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.8';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -353,6 +353,21 @@
     }
   }
   async function command(type, args, taskId, sendId = null) {
+    const result = await commandOnce(type, args, taskId, sendId);
+    if (type !== 'contact' || !result?.reopenRequested) return result;
+    if (args.reopenAttempt) throw new Error('职位页重开后仍未展开聊天，已跳过，不循环重开');
+    if (!still(taskId)) throw new Error('任务已停止，取消重开职位页');
+    const saved = new URL(result.reopenUrl), expected = new URL(args.job.url);
+    if (saved.origin !== 'https://www.zhipin.com' || saved.username || saved.password ||
+        saved.pathname !== expected.pathname || !saved.pathname.startsWith('/job_detail/'))
+      throw new Error('保存的职位网址与当前岗位不一致，取消重开');
+    saved.hash = '';
+    const s = state(); log(s, '已保存当前职位网址并关闭旧工作页，按原网址重开一次；沿用本次首聊预约'); persist(s);
+    const reopened = await commandOnce(type, { ...args, job: { ...args.job, url: saved.href }, reopenAttempt: true }, taskId, sendId);
+    if (reopened?.reopenRequested) throw new Error('职位页重开后仍未展开聊天，已跳过，不循环重开');
+    return reopened;
+  }
+  async function commandOnce(type, args, taskId, sendId = null) {
     if (!['inspect', 'contact', 'openOnly'].includes(type)) throw new Error('自动回复、私信巡检和附件功能已移除');
     if (!still(taskId)) throw new Error('任务已停止');
     const s = state();
@@ -401,7 +416,7 @@
         if (result) {
           put('command', null); GM_deleteValue(prefix + 'result.' + id);
           if (!result.ok) throw resultError(result);
-          const completed = state(); log(completed, label + '完成'); persist(completed);
+          const completed = state(); log(completed, result.data?.reopenRequested ? '聊天未展开，已记录职位网址并准备关闭重开' : label + '完成'); persist(completed);
           return result.data;
         }
         if (handle.closed) throw new Error('工作页在读取完成前已关闭，请重新启动');
@@ -870,55 +885,26 @@
         const approvedRetry = cmd.args.retryApproved && state().entries[C.pair(job)]?.retryApproved;
         if (detail.contactTargetJobId !== job.jobId && !(approvedRetry && detail.alreadyContacted && job.contactTargetJobId === job.jobId) && !(c.profile.verifiedContact && c.profile.firstContactOpensEmptyChat)) throw new Error('沟通按钮未提供与当前岗位一致的目标，暂停以避免错发');
         if (C.pair(detail) !== C.pair(job) || C.hardFilter(detail, c).status !== 'pass') throw new Error('岗位身份或城市条件发生变化');
-        if (detail.alreadyContacted) { workerFinish(cmd, { confirmed: false, existing: true, reason: '页面已有沟通，请手动处理；已移除招聘者列表查找' }); return; }
+        if (detail.alreadyContacted && !cmd.args.reopenAttempt) { workerFinish(cmd, { confirmed: false, existing: true, reason: '页面已有沟通，请手动处理；已移除招聘者列表查找' }); return; }
         const button = adapter.button(adapter.p.contact);
-        const contactChatUrl = adapter.contactChatUrl(button, job);
+        if (cmd.args.reopenAttempt && !/^(继续沟通|立即沟通)$/.test(String(button.innerText || button.textContent || '').replace(/\s/g, '')))
+          throw new Error('重开职位页未找到明确的继续沟通或立即沟通按钮');
+        const savedDetailUrl = new URL(location.href); savedDetailUrl.hash = '';
         if (button.tagName === 'A' && button.getAttribute('target') === '_blank') button.setAttribute('target', '_self');
         workerGuard(cmd, true); sendStage(cmd, 'opening');
-        workerPhase(cmd, 'opening', { openedAt: Date.now(), contactChatUrl, contactNavigationUsed: false });
+        workerPhase(cmd, 'opening', { openedAt: Date.now(), savedDetailUrl: savedDetailUrl.href });
         button.click(); return;
       }
       if (cmd.type === 'contact') {
         // If a default greeting was sent by BOSS, history detects it and prevents a second one.
         if (!adapter.chatReady()) {
-          const popup = adapter.startChatPopup();
-          if (popup) {
-            if (cmd.popupContinuedAt) throw new Error('继续沟通后岗位弹窗再次出现，已停止该动作，不循环点击');
-            if (cmd.popupCloseAt) {
-              if (Date.now() - cmd.popupCloseAt >= 3000) throw new Error('岗位沟通弹窗关闭未生效，已保留现场交人工');
-              return;
-            }
-            await stableWorkerGuard(cmd, true);
-            workerPhase(cmd, 'opening', { popupCloseAt: Date.now() });
-            workerProgress(cmd, 'opening', '识别到岗位沟通弹窗，关闭一次后等待继续沟通；不在弹窗内发送');
-            popup.close.click(); return;
-          }
-          if (cmd.popupCloseAt && !cmd.popupContinuedAt) {
-            if (Date.now() - cmd.popupCloseAt < 300) return;
-            const button = adapter.continueContactButton(job);
-            await stableWorkerGuard(cmd, true);
-            const contactChatUrl = adapter.contactChatUrl(button, job);
-            if (button.tagName === 'A' && button.getAttribute('target') === '_blank') button.setAttribute('target', '_self');
-            workerPhase(cmd, 'opening', { popupContinuedAt: Date.now(), openedAt: Date.now(), contactChatUrl, contactNavigationUsed: false });
-            workerProgress(cmd, 'opening', '弹窗已关闭，点击当前岗位的继续沟通一次');
-            button.click(); return;
-          }
+          const popup = adapter.hasStartChatPopup();
           const elapsed = Date.now() - (cmd.openedAt || cmd.createdAt);
-          const onChatPage = new URL(location.href).pathname === new URL(adapter.p.chatUrl).pathname;
-          if (!onChatPage && elapsed >= 5000 && !cmd.openingFocusAt) {
+          if (popup || elapsed >= 30000) {
+            if (cmd.args.reopenAttempt) throw new Error('职位页重开后聊天仍未正常展开，已跳过，不再重开或重复点击');
             await stableWorkerGuard(cmd, true);
-            workerPhase(cmd, 'opening', { openingFocusAt: Date.now() });
-            workerProgress(cmd, 'opening', '沟通后仍未进入消息页，激活当前工作页恢复一次；不重复点击立即沟通');
-            window.focus(); return;
-          }
-          const openingDeadline = Math.max((cmd.openedAt || cmd.createdAt) + 30000, (cmd.openingFocusAt || 0) + 15000);
-          if (Date.now() >= openingDeadline) throw new Error(onChatPage ?
-            '聊天窗口未自动展开：已进入消息页但未识别到展开的会话；不重复点击沟通，请诊断该工作页' :
-            '聊天窗口未自动展开：一次前台恢复后仍在岗位页或其他页面；不重复点击沟通，请检查弹窗或沟通按钮');
-          if (!onChatPage && elapsed >= 5000 && cmd.contactChatUrl && !cmd.contactNavigationUsed) {
-            workerProgress(cmd, 'opening', '原页面未完成跳转，使用沟通按钮提供的岗位聊天链接进入（仅一次）');
-            workerPhase(cmd, 'opening', { contactNavigationUsed: true });
-            navigateWorker(cmd, cmd.contactChatUrl); return;
+            workerProgress(cmd, 'opening', popup ? '识别到岗位内弹窗，保存职位网址并关闭重开' : '等待聊天展开超时，保存职位网址并关闭重开');
+            workerFinish(cmd, { reopenRequested: true, reopenUrl: cmd.savedDetailUrl || job.url }); return;
           }
           return;
         }

@@ -10,8 +10,9 @@ async function run(options = {}) {
   const c = { ...C.defaults(), autoSend: true, verifiedEmptyContact: !!options.verifiedEmptyContact, verifyChatWindow: options.verifyChatWindow !== false, resumeName: '测试简历.pdf', profile: { verifiedContact: true, firstContactOpensEmptyChat: true, verifiedReply: true, verifiedResume: true } };
   const s = C.emptyState(); s.task = C.createTask(c, now); s.task.leaseToken = 'leader';
   const cmd = { id: 'cmd', workerId: 'worker', taskId: s.task.id, sendId: 'send', owner: 'leader', createdAt: now,
-    fillDelay: options.fillDelay || 0, sendDelay: options.sendDelay || 0, type: options.type || 'contact', phase: options.phase || 'chat', contactChatUrl: options.contactChatUrl || '', args: { job, text: '您好，我有相关项目经验', historyTail: 'in1', inboundId: 'in1', resumeName: c.resumeName } };
+    fillDelay: options.fillDelay || 0, sendDelay: options.sendDelay || 0, type: options.type || 'contact', phase: options.phase || 'chat', savedDetailUrl: options.savedDetailUrl || '', args: { job, text: '您好，我有相关项目经验', historyTail: 'in1', inboundId: 'in1', resumeName: c.resumeName } };
   s.outbox.push({ id: 'send', status: 'pending', taskId: s.task.id });
+  if (options.reopenAttempt) cmd.args.reopenAttempt = true;
   if (options.retryApproved) { cmd.args.retryApproved = true; s.entries[C.pair(job)] = { job, retryApproved: true }; }
   const history = options.history || (cmd.type === 'contact' ? [] : [{ id: 'in1', role: 'recruiter', text: '请发一份简历', rich: false }]);
   let draft = '', editorReads = 0;
@@ -27,7 +28,6 @@ async function run(options = {}) {
       }
     }
     chatReady() {
-      if (options.startPopup && events.includes('continue') && !options.popupReturns) return true;
       if (options.openAfterRecovery && events.includes('focus')) return true;
       return options.emptyChat ? events.includes('selectConversation') && !options.neverLoads : true;
     }
@@ -40,7 +40,7 @@ async function run(options = {}) {
     }
     one() { return {}; }
     text() { return options.ambiguousResume ? '另一份简历' : c.resumeName; }
-    button(selector) { return { click() {
+    button(selector) { return { innerText: options.alreadyContacted ? '继续沟通' : '立即沟通', click() {
       events.push(selector);
       if (selector === 'send' && !options.noReceipt) history.push({ id: 'out1', role: options.receiptRole || 'candidate', text: options.receiptText ?? draft });
     } }; }
@@ -53,15 +53,7 @@ async function run(options = {}) {
     }
     editor() { return { value: draft }; }
     editorMatches(text) { return !options.editorMismatch && ++editorReads > (options.editorDelayReads || 0) && draft === text; }
-    contactChatUrl() { return options.contactChatUrl || ''; }
-    startChatPopup() {
-      if (!options.startPopup || events.includes('closePopup') && !options.popupStays && !(options.popupReturns && events.includes('continue'))) return null;
-      return { close: { click() { events.push('closePopup'); if (options.stopOnPopupClose) store.set('bossai.v1.stopRequest', { manual: true }); } } };
-    }
-    continueContactButton() {
-      if (options.continueMissing) throw new Error('未找到继续沟通按钮');
-      return { click() { events.push('continue'); } };
-    }
+    hasStartChatPopup() { return !!options.startPopup; }
     jobId() { return 'j'; }
     inspectJob() { return job; }
     safeUrl(url) { return new URL(url); }
@@ -220,7 +212,7 @@ test('an outgoing AI notice skips greeting without claiming an uncertain send', 
 });
 test('a target conversation that never loads times out without another contact click or send', async () => {
   const { events, result } = await run({ phase: 'opening', emptyChat: true, neverLoads: true, extraTicks: 3, tickMs: 14000 });
-  assert.equal(result.ok, false); assert.match(result.error, /聊天窗口未自动展开/);
+  assert.equal(result.ok, true); assert.equal(result.data.reopenRequested, true);
   assert.equal(events.filter(x => x === 'selectConversation').length, 0);
   assert.equal(events.includes('contact'), false); assert.equal(events.includes('send'), false);
 });
@@ -339,66 +331,24 @@ test('failed focus or stop during focus prevents sending', async () => {
   }
 });
 
-test('opening never abandons the job for a generic empty chat page', async () => {
-  const r = await run({ phase: 'opening', locationHref: 'https://www.zhipin.com/job_detail/j.html', emptyChat: true, neverLoads: true, extraTicks: 3, tickMs: 14000 });
-  assert.equal(r.events.some(x => x.startsWith('navigate:')), false);
-  assert.match(r.result.error, /仍在岗位页/);
-  assert.equal(r.events.includes('contact'), false);
-});
-test('opening uses the explicit job chat URL once without dropping its parameters', async () => {
-  const url = 'https://www.zhipin.com/web/geek/chat?jobId=j&securityId=test-token';
-  const r = await run({ phase: 'opening', locationHref: 'https://www.zhipin.com/job_detail/j.html', contactChatUrl: url, emptyChat: true, neverLoads: true, extraTicks: 4, tickMs: 6000 });
-  const routes = r.events.filter(x => x.startsWith('navigate:'));
-  assert.equal(routes.length, 1);
-  const parsed = new URL(routes[0].slice('navigate:'.length));
-  assert.equal(parsed.searchParams.get('jobId'), 'j');
-  assert.equal(parsed.searchParams.get('securityId'), 'test-token');
-  assert.equal(r.events.includes('contact'), false);
-});
-
-test('stuck contact activates its work page only once without reclicking contact', async () => {
-  const r = await run({ phase: 'opening', hidden: true, locationHref: 'https://www.zhipin.com/job_detail/j.html', emptyChat: true, neverLoads: true, extraTicks: 6, tickMs: 6000 });
-  assert.equal(r.events.filter(x => x === 'focus').length, 1);
+test('a popup requests one reopen using the remembered full detail URL without clicking its close', async () => {
+  const url = 'https://www.zhipin.com/job_detail/j.html?securityId=test';
+  const r = await run({ phase: 'opening', emptyChat: true, startPopup: true, savedDetailUrl: url });
+  assert.equal(r.result.data.reopenRequested, true);
+  assert.equal(r.result.data.reopenUrl, url);
   assert.equal(r.events.includes('contact'), false);
   assert.equal(r.events.includes('send'), false);
-  assert.match(r.result.error, /一次前台恢复后/);
+  assert.equal(r.events.includes('focus'), false);
 });
-test('a conversation opened by one-time activation continues through normal send checks', async () => {
-  const r = await run({ phase: 'opening', hidden: true, locationHref: 'https://www.zhipin.com/job_detail/j.html', emptyChat: true, openAfterRecovery: true, extraTicks: 3, tickMs: 6000 });
-  assert.equal(r.result.data.confirmed, true);
-  assert.equal(r.events.includes('contact'), false);
+test('an unsuccessful reopened page never requests another reopen', async () => {
+  const r = await run({ phase: 'opening', emptyChat: true, startPopup: true, reopenAttempt: true });
+  assert.equal(r.result.ok, false);
+  assert.match(r.result.error, /不再重开/);
+  assert.equal(r.events.includes('send'), false);
+});
+test('reopened detail permits continue communication but existing contacts otherwise remain skipped', async () => {
+  const r = await run({ phase: 'new', alreadyContacted: true, reopenAttempt: true, extraTicks: 1,
+    locationHref: 'https://www.zhipin.com/job_detail/j.html' });
+  assert.equal(r.events.filter(x => x === 'contact').length, 1);
   assert.equal(r.events.filter(x => x === 'send').length, 1);
-  const notes = r.store.get('bossai.v1.command').progress.map(x => x.message);
-  assert.equal(notes.filter(x => /恢复一次/.test(x)).length, 1);
-});
-test('stop during recovery activation prevents any send', async () => {
-  const r = await run({ phase: 'opening', hidden: true, locationHref: 'https://www.zhipin.com/job_detail/j.html', emptyChat: true, openAfterRecovery: true, stopOnFocus: true, extraTicks: 3, tickMs: 6000 });
-  assert.equal(r.events.filter(x => x === 'focus').length, 1);
-  assert.equal(r.events.includes('send'), false);
-  assert.equal(r.events.includes('contact'), false);
-});
-
-test('inline start-chat popup is closed once and continue opens normal chat before sending', async () => {
-  const r = await run({ phase: 'opening', emptyChat: true, startPopup: true, extraTicks: 4 });
-  assert.equal(r.result.data.confirmed, true);
-  assert.equal(r.events.filter(x => x === 'closePopup').length, 1);
-  assert.equal(r.events.filter(x => x === 'continue').length, 1);
-  assert.ok(r.events.indexOf('closePopup') < r.events.indexOf('continue'));
-  assert.ok(r.events.indexOf('continue') < r.events.indexOf('fill'));
-  assert.equal(r.events.filter(x => x === 'send').length, 1);
-});
-test('popup failures and stop never trigger repeated close or continue clicks', async () => {
-  for (const extra of [{ popupStays: true }, { popupReturns: true }, { continueMissing: true }, { stopOnPopupClose: true }]) {
-    const r = await run({ phase: 'opening', emptyChat: true, startPopup: true, extraTicks: 6, ...extra });
-    assert.equal(r.events.filter(x => x === 'closePopup').length, 1);
-    assert.ok(r.events.filter(x => x === 'continue').length <= 1);
-    assert.equal(r.events.includes('send'), false);
-  }
-});
-test('platform greeting discovered after popup continuation still blocks another greeting', async () => {
-  const r = await run({ phase: 'opening', emptyChat: true, startPopup: true, extraTicks: 4,
-    history: [{ id: 'platform-1', role: 'candidate', text: '您好，期待沟通', rich: false }] });
-  assert.equal(r.result.data.notSent, true);
-  assert.equal(r.events.includes('fill'), false);
-  assert.equal(r.events.includes('send'), false);
 });

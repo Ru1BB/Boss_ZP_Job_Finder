@@ -481,34 +481,11 @@ test('default adapter no longer exposes attachment or reply adaptation fields', 
   }
 });
 
-test('contact navigation accepts only explicit same-site chat links for the current job', () => {
-  const a = adapter();
-  const good = 'https://www.zhipin.com/web/geek/chat?jobId=job1&securityId=test';
-  assert.equal(a.contactChatUrl(element({ 'data-url': good }), { jobId: 'job1' }), good);
-  for (const href of ['/web/geek/chat', '/web/geek/chat?jobId=other', 'https://example.com/web/geek/chat?jobId=job1', 'javascript:void(0)'])
-    assert.equal(a.contactChatUrl(element({ href }), { jobId: 'job1' }), '');
-});
-
-function popupAdapter({ draft = '', closeCount = 1 } = {}) {
-  const content = element(), dialog = element(), close = element();
-  content.closest = selector => selector === '.dialog-con' ? dialog : null;
-  content.selectors['textarea.input-area'] = [{ value: draft }];
-  dialog.selectors['.icon-close, .dialog-close, .close-icon, .close, [aria-label="关闭"], [title="关闭"], [aria-label="Close"]'] = Array.from({ length: closeCount }, () => close);
+test('inline popup detection preserves drafts and does not need its close control', () => {
+  const content = element(); content.selectors['textarea.input-area'] = [{ value: '' }];
   const a = adapter({ '.startchat-content': [content] });
-  return { a, close };
-}
-test('only the identified empty inline chat popup exposes its close control', () => {
-  const { a, close } = popupAdapter();
-  assert.equal(a.startChatPopup().close, close);
-  assert.equal(adapter().startChatPopup(), null);
-  assert.throws(() => popupAdapter({ draft: '人工草稿' }).a.startChatPopup(), /已有草稿/);
-  assert.throws(() => popupAdapter({ closeCount: 0 }).a.startChatPopup(), /关闭按钮/);
-  assert.throws(() => popupAdapter({ closeCount: 2 }).a.startChatPopup(), /关闭按钮/);
-});
-test('continuation accepts only the same job and an explicit continue label', () => {
-  const a = adapter(), button = element({}, '继续沟通'); a.button = () => button;
-  assert.equal(a.continueContactButton({ jobId: 'job1' }), button);
-  assert.throws(() => a.continueContactButton({ jobId: 'other' }), /已离开当前岗位/);
-  button.innerText = '立即沟通';
-  assert.throws(() => a.continueContactButton({ jobId: 'job1' }), /不重复点击/);
+  assert.equal(a.hasStartChatPopup(), true);
+  assert.equal(adapter().hasStartChatPopup(), false);
+  content.selectors['textarea.input-area'][0].value = '人工草稿';
+  assert.throws(() => a.hasStartChatPopup(), /已有草稿/);
 });

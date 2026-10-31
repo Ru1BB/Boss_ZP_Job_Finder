@@ -176,45 +176,14 @@
         contactTargetJobId,
         alreadyContacted: /继续沟通|已沟通/.test(contactText) };
     }
-    startChatPopup() {
+    hasStartChatPopup() {
       const contents = this.nodes('.startchat-content');
-      if (!contents.length) return null;
-      if (contents.length !== 1) throw new Error('找到多个岗位沟通弹窗，无法唯一关闭');
-      const content = contents[0], editors = this.nodes('textarea.input-area', content);
-      if (editors.length !== 1) throw new Error('岗位沟通弹窗结构不明，未自动关闭');
+      if (!contents.length) return false;
+      if (contents.length !== 1) throw new Error('找到多个岗位沟通弹窗，保留现场交人工');
+      const editors = this.nodes('textarea.input-area', contents[0]);
+      if (editors.length !== 1) throw new Error('岗位沟通弹窗结构不明，保留现场交人工');
       if (String(editors[0].value || '').trim()) throw new Error('岗位沟通弹窗已有草稿，保留内容并交人工处理');
-      const dialog = content.closest('.dialog-con');
-      if (!dialog) throw new Error('岗位沟通弹窗缺少可识别的外层，未自动关闭');
-      const selector = '.icon-close, .dialog-close, .close-icon, .close, [aria-label="关闭"], [title="关闭"], [aria-label="Close"]';
-      let closes = this.nodes(selector, dialog).filter(n => !content.contains(n));
-      if (!closes.length && dialog.parentElement?.matches('.dialog-container, .dialog-wrap, .dialog-wrapper, [role="dialog"]'))
-        closes = this.nodes(selector, dialog.parentElement).filter(n => !content.contains(n));
-      if (closes.length !== 1) throw new Error('岗位沟通弹窗关闭按钮不唯一或未匹配，请提供弹窗关闭按钮诊断');
-      const close = closes[0];
-      if (close.disabled || close.getAttribute('aria-disabled') === 'true') throw new Error('岗位沟通弹窗关闭按钮不可用');
-      return { close };
-    }
-    continueContactButton(job) {
-      this.health();
-      if (this.jobId(this.doc.location.href) !== job.jobId) throw new Error('关闭弹窗后已离开当前岗位，取消继续沟通');
-      const button = this.button(this.p.contact);
-      if (String(button.innerText || button.textContent || '').replace(/\s/g, '') !== '继续沟通')
-        throw new Error('关闭弹窗后未找到继续沟通按钮，不重复点击立即沟通');
-      return button;
-    }
-    contactChatUrl(button, job) {
-      // Only follow an explicit DOM link tied to this job; never guess chat parameters.
-      for (const attr of ['data-url', 'href']) {
-        const raw = button.getAttribute?.(attr);
-        if (!raw) continue;
-        try {
-          const url = new URL(raw, this.doc.location.href);
-          if (url.origin === 'https://www.zhipin.com' && !url.username && !url.password &&
-              url.pathname === '/web/geek/chat' && url.searchParams.get('jobId') === job.jobId)
-            return url.href;
-        } catch { /* javascript, malformed or unrelated links are not navigation targets */ }
-      }
-      return '';
+      return true;
     }
     chatReady() {
       return !this.nodes(this.p.chatEmpty).length && !!(this.nodes(this.p.chatIdentity).length || this.nodes(this.p.chatHeader).length);

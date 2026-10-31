@@ -714,6 +714,44 @@ test('failed page commands also close their own tabs', async () => {
   await assert.rejects(r.api.command('inspect', { job: { url: 'https://www.zhipin.com/job_detail/test.html' } }, r.state().task.id), /页面不匹配/);
   assert.equal(closed, true);
 });
+
+test('reopen remembers the exact URL, closes the old tab first and reuses one reservation', async () => {
+  const r = runtime(); r.api.start(); const opened = [], handles = [];
+  r.state().task.contacts = 7;
+  r.context.GM_getTabs = callback => callback({});
+  const saved = 'https://www.zhipin.com/job_detail/test.html?securityId=test-token&from=detail';
+  r.context.GM_openInTab = url => {
+    if (handles.length) assert.equal(handles.at(-1).closed, true);
+    const cmd = r.store.get('bossai.v1.command'); opened.push({ url, cmd });
+    const handle = { closed: false, close() { this.closed = true; } }; handles.push(handle);
+    r.store.set('bossai.v1.result.' + cmd.id, { ok: true, data: opened.length === 1 ?
+      { reopenRequested: true, reopenUrl: saved } : { confirmed: true } });
+    return handle;
+  };
+  const result = await r.api.command('contact', { job: { url: 'https://www.zhipin.com/job_detail/test.html' } }, r.state().task.id, 'same-reservation');
+  assert.equal(result.confirmed, true); assert.equal(opened.length, 2);
+  const second = new URL(opened[1].url); second.hash = '';
+  assert.equal(second.href, saved);
+  assert.equal(opened[1].cmd.args.reopenAttempt, true);
+  assert.equal(opened[0].cmd.sendId, opened[1].cmd.sendId);
+  assert.equal(r.state().task.contacts, 7);
+  assert.ok(handles.every(x => x.closed));
+});
+
+test('reopening is bounded, rejects unrelated URLs and respects a stop between pages', async () => {
+  for (const mode of ['repeat', 'bad-url', 'stop']) {
+    const r = runtime(); r.api.start(); let opened = 0;
+    r.context.GM_getTabs = callback => callback({});
+    r.context.GM_openInTab = () => {
+      opened++; const cmd = r.store.get('bossai.v1.command');
+      r.store.set('bossai.v1.result.' + cmd.id, { ok: true, data: { reopenRequested: true,
+        reopenUrl: mode === 'bad-url' ? 'https://example.com/job_detail/test.html' : 'https://www.zhipin.com/job_detail/test.html' } });
+      return { closed: false, close() { this.closed = true; if (mode === 'stop') r.store.set('bossai.v1.stopRequest', { manual: true }); } };
+    };
+    await assert.rejects(r.api.command('contact', { job: { url: 'https://www.zhipin.com/job_detail/test.html' } }, r.state().task.id), /不循环重开|网址.*不一致|任务已停止/);
+    assert.equal(opened, mode === 'repeat' ? 2 : 1);
+  }
+});
 test('an unclosed old worker blocks new page creation', async () => {
   const r = runtime(); r.api.start(); let opened = 0;
   r.store.set('bossai.v1.activeWorker', { id: 'old' });
