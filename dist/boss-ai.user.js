@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS AI 求职助手
 // @namespace    local.boss-ai
-// @version      0.2.5
+// @version      0.2.6
 // @updateURL    https://7355608.site/userscripts/boss-ai.meta.js
 // @downloadURL  https://7355608.site/userscripts/boss-ai.user.js
 // @description  AI 职位筛选、受控沟通与北京时间调度；请先校准页面
@@ -1193,7 +1193,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
 
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.5';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.6';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -2076,9 +2076,16 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
         if (!adapter.chatReady()) {
           const elapsed = Date.now() - (cmd.openedAt || cmd.createdAt);
           const onChatPage = new URL(location.href).pathname === new URL(adapter.p.chatUrl).pathname;
-          if (elapsed >= 30000) throw new Error(onChatPage ?
+          if (!onChatPage && elapsed >= 5000 && !cmd.openingFocusAt) {
+            await stableWorkerGuard(cmd, true);
+            workerPhase(cmd, 'opening', { openingFocusAt: Date.now() });
+            workerProgress(cmd, 'opening', '沟通后仍未进入消息页，激活当前工作页恢复一次；不重复点击立即沟通');
+            window.focus(); return;
+          }
+          const openingDeadline = Math.max((cmd.openedAt || cmd.createdAt) + 30000, (cmd.openingFocusAt || 0) + 15000);
+          if (Date.now() >= openingDeadline) throw new Error(onChatPage ?
             '聊天窗口未自动展开：已进入消息页但未识别到展开的会话；不重复点击沟通，请诊断该工作页' :
-            '聊天窗口未自动展开：点击立即沟通后仍在岗位页或其他页面；未取得可用的聊天跳转结果，请检查弹窗或沟通按钮');
+            '聊天窗口未自动展开：一次前台恢复后仍在岗位页或其他页面；不重复点击沟通，请检查弹窗或沟通按钮');
           if (!onChatPage && elapsed >= 5000 && cmd.contactChatUrl && !cmd.contactNavigationUsed) {
             workerProgress(cmd, 'opening', '原页面未完成跳转，使用沟通按钮提供的岗位聊天链接进入（仅一次）');
             workerPhase(cmd, 'opening', { contactNavigationUsed: true });

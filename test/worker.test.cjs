@@ -26,7 +26,10 @@ async function run(options = {}) {
         const e = new Error('页面检测异常'); e.code = 'PAGE_HEALTH'; e.healthIssue = { kind: options.healthKind }; throw e;
       }
     }
-    chatReady() { return options.emptyChat ? events.includes('selectConversation') && !options.neverLoads : true; }
+    chatReady() {
+      if (options.openAfterRecovery && events.includes('focus')) return true;
+      return options.emptyChat ? events.includes('selectConversation') && !options.neverLoads : true;
+    }
     assertChatReady() { if (!this.chatReady()) throw new Error('聊天窗口未展开'); }
     history() { return structuredClone(history); }
     nodes(selector) {
@@ -341,5 +344,27 @@ test('opening uses the explicit job chat URL once without dropping its parameter
   const parsed = new URL(routes[0].slice('navigate:'.length));
   assert.equal(parsed.searchParams.get('jobId'), 'j');
   assert.equal(parsed.searchParams.get('securityId'), 'test-token');
+  assert.equal(r.events.includes('contact'), false);
+});
+
+test('stuck contact activates its work page only once without reclicking contact', async () => {
+  const r = await run({ phase: 'opening', hidden: true, locationHref: 'https://www.zhipin.com/job_detail/j.html', emptyChat: true, neverLoads: true, extraTicks: 6, tickMs: 6000 });
+  assert.equal(r.events.filter(x => x === 'focus').length, 1);
+  assert.equal(r.events.includes('contact'), false);
+  assert.equal(r.events.includes('send'), false);
+  assert.match(r.result.error, /一次前台恢复后/);
+});
+test('a conversation opened by one-time activation continues through normal send checks', async () => {
+  const r = await run({ phase: 'opening', hidden: true, locationHref: 'https://www.zhipin.com/job_detail/j.html', emptyChat: true, openAfterRecovery: true, extraTicks: 3, tickMs: 6000 });
+  assert.equal(r.result.data.confirmed, true);
+  assert.equal(r.events.includes('contact'), false);
+  assert.equal(r.events.filter(x => x === 'send').length, 1);
+  const notes = r.store.get('bossai.v1.command').progress.map(x => x.message);
+  assert.equal(notes.filter(x => /恢复一次/.test(x)).length, 1);
+});
+test('stop during recovery activation prevents any send', async () => {
+  const r = await run({ phase: 'opening', hidden: true, locationHref: 'https://www.zhipin.com/job_detail/j.html', emptyChat: true, openAfterRecovery: true, stopOnFocus: true, extraTicks: 3, tickMs: 6000 });
+  assert.equal(r.events.filter(x => x === 'focus').length, 1);
+  assert.equal(r.events.includes('send'), false);
   assert.equal(r.events.includes('contact'), false);
 });
