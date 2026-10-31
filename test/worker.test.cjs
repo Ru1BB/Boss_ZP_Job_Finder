@@ -19,6 +19,8 @@ async function run(options = {}) {
   class FakeAdapter {
     constructor(doc, profile, jobs, config = {}) { this.p = p; this.verifyChatWindow = config.verifyChatWindow !== false; }
     health() {
+      if (options.focusDependentHealth && store.get('bossai.v1.command')?.phase === 'focusingSend' && context.document.hidden)
+        throw new Error('发送等待结束后检查需要消息页在前台');
       if (options.blocked) throw new Error('验证阻止');
       if (options.healthKind && !(options.recoverOnReload && events.includes('reloadWorker'))) {
         const e = new Error('页面检测异常'); e.code = 'PAGE_HEALTH'; e.healthIssue = { kind: options.healthKind }; throw e;
@@ -306,6 +308,15 @@ test('focus occurs only after drafting and before the send click', async () => {
   assert.ok(r.events.indexOf('fill') < r.events.indexOf('focus'));
   assert.ok(r.events.indexOf('focus') < r.events.indexOf('send'));
   assert.equal(r.events.filter(x => x === 'focus').length, 1);
+});
+test('elapsed send wait activates chat before running post-wait guards', async () => {
+  const r = await run({ hidden: true, sendDelay: 1000, focusDependentHealth: true });
+  assert.equal(r.result.data.confirmed, true);
+  const progress = r.store.get('bossai.v1.command').progress;
+  assert.match(progress[2].message, /等待已结束，立即切换/);
+  assert.match(progress[3].message, /已切到前台/);
+  assert.equal(r.events.filter(x => x === 'focus').length, 1);
+  assert.equal(r.events.filter(x => x === 'send').length, 1);
 });
 test('failed focus or stop during focus prevents sending', async () => {
   for (const options of [{ hidden: true, focusFails: true }, { hidden: true, stopOnFocus: true }]) {

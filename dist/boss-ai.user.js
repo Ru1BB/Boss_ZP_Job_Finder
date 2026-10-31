@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS AI 求职助手
 // @namespace    local.boss-ai
-// @version      0.2.3
+// @version      0.2.4
 // @updateURL    https://7355608.site/userscripts/boss-ai.meta.js
 // @downloadURL  https://7355608.site/userscripts/boss-ai.user.js
 // @description  AI 职位筛选、受控沟通与北京时间调度；请先校准页面
@@ -1179,7 +1179,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
 
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.3';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.4';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -2092,16 +2092,16 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id) throw new Error('填写期间会话发生变化，草稿留待人工处理');
       if (!adapter.editorMatches(text)) throw new Error('输入框内容与拟发送消息不一致，取消发送（已等待编辑器同步，草稿保留；请核对换行或网页是否改写内容）');
       workerPhase(cmd, 'waitingSend', { waitUntil: Date.now() + (cmd.sendDelay || 0) });
-      await guardedDelay(cmd.sendDelay || 0, () => stableWorkerGuard(cmd, true),
-        () => workerProgress(cmd, 'checkingSend', '发送前等待已结束，开始检查执行权、聊天记录和草稿'));
-      workerProgress(cmd, 'focusingSend', '准备发送，正在切换消息工作页到前台');
-      await stableWorkerGuard(cmd, true);
-      window.focus();
+      await guardedDelay(cmd.sendDelay || 0, () => stableWorkerGuard(cmd, true), () => {
+        workerProgress(cmd, 'focusingSend', '发送前等待已结束，立即切换消息工作页到前台');
+        window.focus();
+      });
       const focusDeadline = Date.now() + 5000;
       while (document.hidden && Date.now() < focusDeadline) {
         await sleep(500); await stableWorkerGuard(cmd, true);
       }
       if (document.hidden) throw new Error('消息工作页未能切换到前台，已取消发送并保留草稿');
+      workerProgress(cmd, 'checkingSend', '消息页已切到前台，开始检查聊天记录和草稿');
       adapter.assertChatReady();
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id || !adapter.editorMatches(text)) throw new Error('等待发送期间会话或草稿发生变化，取消发送');
       workerProgress(cmd, 'locatingSend', '聊天记录和草稿检查通过，正在定位发送按钮');
