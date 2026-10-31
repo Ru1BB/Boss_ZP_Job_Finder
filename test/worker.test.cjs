@@ -91,6 +91,27 @@ async function run(options = {}) {
   return { events, result: store.get('bossai.v1.result.cmd'), store, history };
 }
 
+test('first-contact diagnostics distinguish elapsed waits, click and confirmed receipt', async () => {
+  const r = await run({ fillDelay: 500, sendDelay: 500 });
+  assert.equal(r.result.ok, true);
+  assert.equal(r.result.data.confirmed, true);
+  const progress = r.store.get('bossai.v1.command').progress.map(x => x.message);
+  assert.equal(progress.length, 7);
+  assert.match(progress[0], /填入前等待已结束/);
+  assert.match(progress[2], /发送前等待已结束/);
+  assert.match(progress[4], /准备点击发送/);
+  assert.match(progress[5], /已执行点击发送/);
+  assert.match(progress[6], /回执确认成功/);
+  assert.equal(r.events.filter(x => x === 'send').length, 1);
+});
+
+test('failed receipt diagnostics never report success or repeat the click', async () => {
+  const r = await run({ noReceipt: true });
+  assert.equal(r.result.data.confirmed, false);
+  assert.match(r.store.get('bossai.v1.command').progress.at(-1).message, /未确认/);
+  assert.equal(r.events.filter(x => x === 'send').length, 1);
+});
+
 test('retired late-loading workers cannot send and close attempts remain bounded', async () => {
   const r = await run({ retired: true, closeThrows: true, extraTicks: 5 });
   assert.equal(r.result, undefined); assert.equal(r.events.includes('send'), false);

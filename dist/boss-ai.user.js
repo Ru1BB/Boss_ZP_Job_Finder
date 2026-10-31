@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         BOSS AI 求职助手（试运行优先）
+// @name         BOSS AI 求职助手
 // @namespace    local.boss-ai
-// @version      0.1.47
+// @version      0.2.1
 // @updateURL    https://7355608.site/userscripts/boss-ai.meta.js
 // @downloadURL  https://7355608.site/userscripts/boss-ai.user.js
 // @description  AI 职位筛选、受控沟通与北京时间调度；请先校准页面
@@ -1178,7 +1178,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
 
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.1.47';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.1';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -1520,12 +1520,14 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     }
     result.greeting = C.greetingMessage(result.greeting, c.resume, job); return result;
   }
-  async function guardedDelay(ms, guard) {
+  async function guardedDelay(ms, guard, onElapsed = () => {}) {
     const deadline = Date.now() + Math.max(0, ms);
-    await guard();
+    let notified = false;
+    const notify = () => { if (!notified && Date.now() >= deadline) { notified = true; onElapsed(); } };
+    notify(); await guard();
     while (Date.now() < deadline) {
       await sleep(Math.min(500, deadline - Date.now()));
-      await guard();
+      notify(); await guard();
     }
   }
   async function command(type, args, taskId, sendId = null) {
@@ -1560,8 +1562,18 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       if (!handle || typeof handle.close !== 'function') throw new Error('油猴未返回可关闭的工作页句柄');
       handle.onclose = () => put('workerClosed.' + wid, true);
       const expires = cmd.createdAt + cmd.timeoutMs;
+      let reported = 0;
       while (Date.now() < expires) {
         if (!still(taskId)) { put('cancel.' + id, true); throw new Error('任务停止，已取消页面操作'); }
+        const liveCommand = get('command');
+        if (liveCommand?.id === id) {
+          const events = liveCommand.progress || [];
+          if (events.length > reported) {
+            const progressState = state();
+            for (const event of events.slice(reported)) log(progressState, event.message);
+            reported = events.length; persist(progressState);
+          }
+        }
         const result = get('result.' + id);
         if (result) {
           put('command', null); GM_deleteValue(prefix + 'result.' + id);
@@ -1572,7 +1584,8 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
         if (handle.closed) throw new Error('工作页在读取完成前已关闭，请重新启动');
         await sleep(500);
       }
-      put('cancel.' + id, true); throw new Error('页面操作超时；如涉及发送则状态待核实，不会自动重发');
+      const last = get('command');
+      put('cancel.' + id, true); throw new Error('页面操作超时；最后阶段：' + (last?.progress?.at(-1)?.message || last?.phase || '未知') + '；如涉及发送则状态待核实，不会自动重发');
     } finally {
       const closed = await closeManagedWorker(wid, handle);
       workerTab = null; workerTabId = null;
@@ -1960,6 +1973,13 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     }
   }
   function workerPhase(cmd, phase, extra = {}) { Object.assign(cmd, extra, { phase }); put('command', cmd); }
+  function workerProgress(cmd, phase, message) {
+    if (get('command')?.id !== cmd.id || get('cancel.' + cmd.id)) {
+      const error = new Error('当前工作指令已取消或被替换'); error.code = 'COMMAND_CANCELLED'; throw error;
+    }
+    cmd.progress = [...(cmd.progress || []), { at: Date.now(), message }];
+    workerPhase(cmd, phase, { phaseAt: Date.now() });
+  }
   function sendStage(cmd, stage) {
     if (cmd.sendId) put('sendStage.' + cmd.sendId, { commandId: cmd.id, stage, at: Date.now() });
   }
@@ -2002,7 +2022,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       if (get('consumed.' + cmd.id)) {
         workerFinish(cmd, { confirmed: false, reason: '发送操作已执行过但确认中断，请人工核对' }); return;
       }
-      if (['waitingFill', 'waitingSend'].includes(cmd.phase)) throw new Error('等待期间工作页已重载，已取消本次动作，请人工核对；不会重新点击沟通或发送');
+      if (['waitingFill', 'waitingSend', 'checkingFill', 'drafting', 'checkingSend', 'locatingSend', 'clickingSend'].includes(cmd.phase)) throw new Error('等待期间工作页已重载，已取消本次动作，请人工核对；不会重新点击沟通或发送');
       if (cmd.type === 'openOnly') {
         if (!c.openRejected || !c.verifiedEmptyContact) throw new Error('尚未确认立即沟通不会自动发送平台招呼，跳过');
         if (adapter.jobId(location.href) !== job.jobId) { navigateWorker(cmd, job.url); return; }
@@ -2050,10 +2070,12 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       if (!text || C.sensitive(text)) throw new Error('消息为空或涉及关键事项');
       const before = history.map(m => m.id);
       workerPhase(cmd, 'waitingFill', { waitUntil: Date.now() + (cmd.fillDelay || 0) });
-      await guardedDelay(cmd.fillDelay || 0, () => stableWorkerGuard(cmd, true));
+      await guardedDelay(cmd.fillDelay || 0, () => stableWorkerGuard(cmd, true),
+        () => workerProgress(cmd, 'checkingFill', '填入前等待已结束，开始检查执行权和聊天记录'));
       adapter.assertChatReady();
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id) throw new Error('等待填入期间会话发生变化，取消旧消息');
       sendStage(cmd, 'drafting');
+      workerProgress(cmd, 'drafting', '正在填入招呼并检查编辑器同步');
       adapter.fill(text); await sleep(150);
       // Allow a bounded UI render delay; never rewrite the draft or retry a send.
       for (let i = 0; i < 5 && !adapter.editorMatches(text); i++) {
@@ -2063,15 +2085,20 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id) throw new Error('填写期间会话发生变化，草稿留待人工处理');
       if (!adapter.editorMatches(text)) throw new Error('输入框内容与拟发送消息不一致，取消发送（已等待编辑器同步，草稿保留；请核对换行或网页是否改写内容）');
       workerPhase(cmd, 'waitingSend', { waitUntil: Date.now() + (cmd.sendDelay || 0) });
-      await guardedDelay(cmd.sendDelay || 0, () => stableWorkerGuard(cmd, true));
+      await guardedDelay(cmd.sendDelay || 0, () => stableWorkerGuard(cmd, true),
+        () => workerProgress(cmd, 'checkingSend', '发送前等待已结束，开始检查执行权、聊天记录和草稿'));
       adapter.assertChatReady();
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id || !adapter.editorMatches(text)) throw new Error('等待发送期间会话或草稿发生变化，取消发送');
+      workerProgress(cmd, 'locatingSend', '聊天记录和草稿检查通过，正在定位发送按钮');
       const send = adapter.button(adapter.p.send);
       await stableWorkerGuard(cmd, true);
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id || !adapter.editorMatches(text)) throw new Error('发送前消息记录或草稿变化，取消发送');
+      workerProgress(cmd, 'clickingSend', '发送前检查已通过，准备点击发送');
       sendStage(cmd, 'clicked'); put('consumed.' + cmd.id, true); send.click();
+      workerProgress(cmd, 'verifyingReceipt', '已执行点击发送，正在读取新增消息回执');
       const confirmed = await verifyReceipt(adapter, cmd, before, text);
       if (confirmed) sendStage(cmd, 'confirmed');
+      workerProgress(cmd, 'receiptDone', confirmed ? '已读取到本次新增外发消息，回执确认成功' : '回执检查结束，未确认本次新增外发消息');
       workerFinish(cmd, { confirmed, reason: confirmed ? '' : '消息发送回执未确认' });
     } catch (e) {
       if (e.code === 'WORKER_LEASE_PENDING') return;
@@ -2107,7 +2134,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       header{position:sticky;top:0;z-index:2;padding:16px 18px;background:#eaf6f4;display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid #c8dbdd}header h2{min-width:0}header #close{flex-shrink:0}h2{font-size:17px;margin:0}main{padding:16px}label{display:block;margin:9px 0 4px;font-size:13px}
       input:not([type=checkbox]),textarea,select{width:100%;border:1px solid #bdcdd4;border-radius:6px;padding:8px;color:#172b3a;background:#fff}textarea{min-height:74px;resize:vertical}.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}.actions{display:flex;flex-wrap:wrap;gap:7px;margin:12px 0}details{border-top:1px solid #e1e9eb;margin-top:14px;padding-top:10px}summary{cursor:pointer;font-weight:600}.status{white-space:pre-wrap;padding:10px;background:#f2f6f8;border-radius:7px;font-size:12px}.entry{border-bottom:1px solid #dfe7e9;padding:10px 0}.entry p{margin:4px 0;white-space:pre-wrap;overflow-wrap:anywhere}a{color:#087e77}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px} .pill{border-radius:10px;background:#eaf6f4;padding:2px 6px;font-size:12px}
       </style><button class="launch" id="launch">💼 AI 求职助手</button>
-      <section class="panel" id="panel"><header><h2>AI 求职助手 v${VERSION} <span class="pill">试运行优先</span></h2><button id="close">收起</button></header><main>
+      <section class="panel" id="panel"><header><h2>AI 求职助手 v${VERSION} <span class="pill">正式版</span></h2><button id="close">收起</button></header><main>
       <div id="status" class="status"></div><div class="actions"><button class="primary" id="start">开始新任务</button><button class="danger" id="stop">立即停止</button><button id="clearActivity">清空日志与待处理</button><button id="clearWorker">清理残留工作页</button></div>
       <p class="muted">清空会停止当前任务、取消待处理发送并清空列表；保留内部去重记录、计数及配置，避免重复联系。</p>
       <p class="muted">仅筛选职位并发送首次招呼，不巡检私信或自动回复。Key 保存在油猴本地存储，不会随配置导出。后台冻结可能延迟启动；到停止时间不补发。</p>
@@ -2311,8 +2338,8 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     if (cmd?.taskId === s.task.id) {
       const labels = { inspect: '读取职位详情', contact: '首聊流程', openOnly: '仅打开沟通' };
       const elapsed = Math.max(0, Math.floor((Date.now() - cmd.createdAt) / 1000));
-      const phases = { new: '载入工作页', detail: '载入详情', opening: '打开目标会话', chat: '读取聊天', waitingFill: '等待填入招呼', waitingSend: '填入后等待发送' };
-      const stageWait = ['waitingFill', 'waitingSend'].includes(cmd.phase) ? ` · 本阶段计划${Math.ceil((cmd.phase === 'waitingFill' ? cmd.fillDelay || 0 : cmd.sendDelay || 0) / 1000)}秒（含随机延迟），剩余约${Math.max(0, Math.ceil(((cmd.waitUntil || Date.now()) - Date.now()) / 1000))}秒` : '';
+      const phases = { new: '载入工作页', detail: '载入详情', opening: '打开目标会话', chat: '读取聊天', waitingFill: '等待填入招呼', waitingSend: '填入后等待发送', checkingFill: '等待已结束，检查填入条件', drafting: '填写及同步编辑器', checkingSend: '等待已结束，检查发送条件', locatingSend: '定位发送按钮', clickingSend: '准备点击发送', verifyingReceipt: '已点击发送，核对回执', receiptDone: '回执检查完成' };
+      const stageWait = ['waitingFill', 'waitingSend'].includes(cmd.phase) ? ` · 本阶段计划${Math.ceil((cmd.phase === 'waitingFill' ? cmd.fillDelay || 0 : cmd.sendDelay || 0) / 1000)}秒（含随机延迟），剩余约${Math.max(0, Math.ceil(((cmd.waitUntil || Date.now()) - Date.now()) / 1000))}秒${Date.now() > (cmd.waitUntil || Date.now()) + 5000 ? ' · 倒计时已到，尚未收到工作页继续执行的进度，可能存在后台延迟' : ''}` : '';
       return (cmd.healthCheck ? '页面异常自动复查中 · ' : '') + `当前动作：${labels[cmd.type] || '页面操作'} · ${phases[cmd.phase] || cmd.phase} · 已等待${elapsed}秒 / 上限${Math.ceil((cmd.timeoutMs || 90000) / 1000)}秒（整个流程）` + stageWait +
         (cmd.phase !== 'new' || get('workerRegistered.' + cmd.workerId) ? '' : ' · 等待后台工作页加载并注册脚本');
     }
