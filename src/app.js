@@ -1,6 +1,6 @@
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.9';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.10';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -639,6 +639,11 @@
       }
       if (retiredChat) persist(s);
       validSetup(c);
+      let salaryUpdates = false;
+      for (const entry of Object.values(s.entries)) if (['eligible', 'rejected'].includes(entry.status) && C.salaryBlocked(entry.job, c)) {
+        entry.status = 'salaryRejected'; entry.note = C.hardFilter(entry.job, c).reason; delete entry.retry; salaryUpdates = true;
+      }
+      if (salaryUpdates) persist(s);
       const adapter = new Adapter(document, c.profile); adapter.health();
       if (s.task.healthProbe) { delete s.task.healthProbe; log(s, '页面复查通过，自动继续原任务'); persist(s); }
       if (!location.pathname.includes('/web/geek/jobs')) throw new Error('主标签页已离开搜索页，暂停任务');
@@ -849,6 +854,7 @@
     if (cmd.type === 'contact' && mainClaim?.expires > Date.now())
       put('lease.' + cmd.owner, { ...mainClaim, expires: Math.max(mainClaim.expires, Date.now() + 15000) });
     if (sending && (!c.autoSend || !s.outbox.some(x => x.id === cmd.sendId && x.status === 'pending' && x.taskId === cmd.taskId))) throw new Error('没有有效的发送预约');
+    if (sending && C.salaryBlocked(cmd.args.job, c)) throw new Error(C.hardFilter(cmd.args.job, c).reason);
     if (checkHealth) new Adapter(document, c.profile).health();
     return c;
   }
@@ -922,6 +928,7 @@
         if (!adapter.nodes(adapter.p.detail).length && Date.now() - cmd.createdAt < 15000) return;
         const detail = adapter.inspectJob();
         if (C.pair(detail) !== C.pair(job) || detail.contactTargetJobId !== job.jobId) throw new Error('沟通入口未唯一绑定目标岗位，跳过');
+        if (C.salaryBlocked(detail, c)) throw new Error(C.hardFilter(detail, c).reason);
         if (detail.alreadyContacted) { workerFinish(cmd, { existing: true, reason: '页面已有沟通，跳过仅打开操作' }); return; }
         const button = adapter.button(adapter.p.contact);
         workerGuard(cmd, true); sendStage(cmd, 'clicked'); put('consumed.' + cmd.id, true);
@@ -1071,6 +1078,7 @@
       <div class="row"><div><label>共用随机延迟最小 / 秒</label><input type="number" name="refreshMinSeconds" min="1" max="3600"></div><div><label>共用随机延迟最大 / 秒</label><input type="number" name="refreshMaxSeconds" min="1" max="3600"></div></div>
       <label>AI 请求等待上限 / 秒</label><input type="number" name="aiTimeoutSeconds" min="30" max="600"><p class="muted">默认180秒，可设30–600秒；用于等待完整AI响应，与刷新及发送间隔独立。服务商端的超时不一定随此设置延长。超时按最多3次AI尝试处理，连续失败才暂停；不重试发送点击。</p>
       <p class="muted">默认每轮独立随机等待 10–60 秒；读取完一个职位后刷新搜索页。翻页和滚动也使用随机等待，不重复分析已读职位。AI/加载耗时另计，不保证精确刷新时刻。</p>
+      <label>最低日薪 / 元（0为不限制）</label><input type="number" name="minDailySalary" min="0" max="1000000" step="1"><p class="muted">明确读取到日薪时按范围下限比较；低于该值不分析、不点击沟通、不发招呼。未读到日薪或仅有月薪时继续原流程。</p>
       <label>AI 匹配阈值 / 100</label><input type="number" name="threshold" min="0" max="100"></details>
       <p class="muted">BOSS按所选实习/全职类型筛选，职位符合城市条件且分数达到阈值即可进入发送队列。AI 的“适合/不确定”标记和疑点仅供参考；实际发送仍需授权、窗口和输入框可用，并遵守去重、间隔和额度。</p>
       <details><summary>AI 提示词</summary><p class="muted">评分标准：${C.SCORING.map(x => x.label + ' ' + x.max + '分').join('；')}。AI 给各项分数，代码加总。“优先/加分项”仅影响最后10分，不重复扣分；岗位没有加分条款时此项按10分中性计入。</p><label>筛选要求</label><textarea name="screeningPrompt"></textarea><label>招呼语要求</label><textarea name="greetingPrompt"></textarea><p class="muted">首条招呼包含插件项目介绍与 GitHub 地址；消息末尾不再追加独立的 AI 发送提醒。</p></details>
@@ -1279,7 +1287,7 @@
       (x.status === 'processing' && t?.status === 'running' && x.taskId === t.id ? '处理中：' : '等待：') + x.job.url).join('\n') || '暂无等待链接';
     q('manualQueue').style.whiteSpace = 'pre-wrap';
     const entries = q('entries'); entries.replaceChildren();
-    const labels = { eligible: '待发送/试运行预览', review: '待人工确认', rejected: '不匹配', existing: '已有沟通，跳过', contacted: '已联系', uncertain: '发送待核实', retryable: '发送前中断，待重新评估' };
+    const labels = { eligible: '待发送/试运行预览', review: '待人工确认', rejected: '不匹配', salaryRejected: '低于最低日薪，已跳过', existing: '已有沟通，跳过', contacted: '已联系', uncertain: '发送待核实', retryable: '发送前中断，待重新评估' };
     for (const entry of Object.values(s.entries).filter(entry => !entry.hidden).slice(-60).reverse()) {
       const el = document.createElement('div'); el.className = 'entry';
       const scoreMaxima = entry.analysis?.scoreMaxima || (entry.analysis?.scoringVersion === 1 ? { skills: 40, experience: 25, requirements: 20, preferences: 5, bonus: 10 } : Object.fromEntries(C.SCORING.map(x => [x.key, x.max])));

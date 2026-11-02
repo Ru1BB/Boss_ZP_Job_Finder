@@ -6,8 +6,8 @@ const C = require('../src/core.js');
 const source = fs.readFileSync(require('node:path').join(__dirname, '../src/app.js'), 'utf8');
 async function run(options = {}) {
   const store = new Map(), now = Date.now(), callbacks = [], events = [];
-  const job = { jobId: 'j', recruiterId: 'r', url: 'https://www.zhipin.com/job_detail/j.html', employmentType: '实习', city: '北京', contactTargetJobId: 'j', alreadyContacted: !!options.alreadyContacted };
-  const c = { ...C.defaults(), autoSend: true, verifiedEmptyContact: !!options.verifiedEmptyContact, verifyChatWindow: options.verifyChatWindow !== false, resumeName: '测试简历.pdf', profile: { verifiedContact: true, firstContactOpensEmptyChat: true, verifiedReply: true, verifiedResume: true } };
+  const job = { salary: options.salary || '', jobId: 'j', recruiterId: 'r', url: 'https://www.zhipin.com/job_detail/j.html', employmentType: '实习', city: '北京', contactTargetJobId: 'j', alreadyContacted: !!options.alreadyContacted };
+  const c = { ...C.defaults(), minDailySalary: options.minDailySalary || 0, autoSend: true, verifiedEmptyContact: !!options.verifiedEmptyContact, verifyChatWindow: options.verifyChatWindow !== false, resumeName: '测试简历.pdf', profile: { verifiedContact: true, firstContactOpensEmptyChat: true, verifiedReply: true, verifiedResume: true } };
   const s = C.emptyState(); s.task = C.createTask(c, now); s.task.leaseToken = 'leader';
   const cmd = { id: 'cmd', workerId: 'worker', taskId: s.task.id, sendId: 'send', owner: 'leader', createdAt: now,
     fillDelay: options.fillDelay || 0, sendDelay: options.sendDelay || 0, type: options.type || 'contact', phase: options.phase || 'chat', savedDetailUrl: options.savedDetailUrl || '', args: { job, text: '您好，我有相关项目经验', historyTail: 'in1', inboundId: 'in1', resumeName: c.resumeName } };
@@ -351,4 +351,13 @@ test('reopened detail permits continue communication but existing contacts other
     locationHref: 'https://www.zhipin.com/job_detail/j.html' });
   assert.equal(r.events.filter(x => x === 'contact').length, 1);
   assert.equal(r.events.filter(x => x === 'send').length, 1);
+});
+
+test('a below-minimum daily salary blocks the worker before any fill or click', async () => {
+  const r = await run({ salary: '150-300元/天', minDailySalary: 200 });
+  assert.equal(r.result.ok, false);
+  assert.match(r.result.error, /日薪下限150元/);
+  assert.equal(r.events.includes('fill'), false);
+  assert.equal(r.events.includes('contact'), false);
+  assert.equal(r.events.includes('send'), false);
 });

@@ -1117,3 +1117,34 @@ test('clearing waiting links preserves the active request and removes stopped pr
   r.api.stop('停止', true); r.api.clearQueuedJobs();
   assert.equal(r.api.manualRequests().length, 0);
 });
+
+test('low daily salary skips AI and all communication including rejected-job opening', async () => {
+  const r = runtime({ autoSend: true, openRejected: true, verifiedEmptyContact: true, minDailySalary: 200,
+    refreshMinSeconds: 1, refreshMaxSeconds: 1 }); r.api.start();
+  r.api.enqueueJob('https://www.zhipin.com/job_detail/low-pay.html');
+  const calls = [];
+  workerStub(r, cmd => { calls.push(cmd.type); return { ok: true, data: { ...cmd.args.job,
+    recruiterId: 'boss', city: '北京', title: '实习', salary: '150-300元/天' } }; });
+  r.context.GM_xmlhttpRequest = () => assert.fail('low salary must skip analysis');
+  await r.api.pump();
+  const entry = Object.values(r.state().entries)[0];
+  assert.equal(entry.status, 'salaryRejected'); assert.equal(entry.analysis, null);
+  assert.match(entry.note, /日薪下限150元/);
+  r.context.BossAdapter.Adapter.prototype.cards = () => [];
+  r.context.BossAdapter.Adapter.prototype.advance = () => false;
+  finishScanWait(r); await r.api.pump();
+  assert.deepEqual(calls, ['inspect']); assert.equal(r.state().task.contacts, 0);
+  assert.equal(r.api.manualRequests()[0].status, 'done');
+  assert.equal(r.state().task.status, 'running');
+});
+test('a salary threshold also removes a previously scored job from pending communication', async () => {
+  const r = runtime({ autoSend: true, openRejected: true, verifiedEmptyContact: true, minDailySalary: 200 }); r.api.start();
+  const entry = chatEntry(r, 'low-pay'); entry.taskId = r.state().task.id; entry.status = 'eligible';
+  entry.analysis = { score: 100, greeting: '您好，我有项目经验' }; entry.job.salary = '100-150元/天';
+  r.context.GM_openInTab = () => assert.fail('salary filter must also guard existing entries');
+  r.context.BossAdapter.Adapter.prototype.cards = () => [];
+  r.context.BossAdapter.Adapter.prototype.advance = () => false;
+  await r.api.pump();
+  assert.equal(r.state().entries[entry.key].status, 'salaryRejected');
+  assert.equal(r.state().task.contacts, 0);
+});

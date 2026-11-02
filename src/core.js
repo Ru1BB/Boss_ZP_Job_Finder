@@ -27,7 +27,7 @@
     provider: 'qwen', ...PROVIDERS.qwen, apiKey: '', resume: '', preferences: '',
     screeningPrompt: '综合考虑我的经历、技能和求职偏好，说明匹配理由与不确定性。',
     greetingPrompt: '用自然、简短的中文打招呼，突出真实匹配点，不编造经历，不承诺薪资或面试。',
-    threshold: 80, maxContacts: 50, sendIntervalSeconds: 180, aiTimeoutSeconds: 180,
+    threshold: 80, minDailySalary: 0, maxContacts: 50, sendIntervalSeconds: 180, aiTimeoutSeconds: 180,
     refreshMinSeconds: 10, refreshMaxSeconds: 60,
     beforeOpenSeconds: 0, beforeFillSeconds: 0, beforeSendSeconds: 0, nextJobSeconds: 0,
     scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false,
@@ -90,7 +90,7 @@
       if (typeof c[key] !== 'string') fail(`配置 ${key} 必须是文字`);
     }
     for (const key of ['autoSend', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact', 'switchCategoryOnExhausted', 'debugMode']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
-    for (const [key, min, max] of [['threshold', 0, 100], ['maxContacts', 1, 500],
+    for (const [key, min, max] of [['threshold', 0, 100], ['minDailySalary', 0, 1000000], ['maxContacts', 1, 500],
       ['beforeOpenSeconds', 0, 3600], ['beforeFillSeconds', 0, 3600], ['beforeSendSeconds', 0, 3600], ['nextJobSeconds', 0, 3600],
       ['sendIntervalSeconds', 1, 86400], ['refreshMinSeconds', 1, 3600],
       ['refreshMaxSeconds', 1, 3600], ['aiTimeoutSeconds', 30, 600]]) {
@@ -224,6 +224,7 @@
   }
   function canSend(s, c, now, kind, entry) {
     if (!['contact', 'openOnly'].includes(kind) || !allowed(s, c, now) || !c.autoSend) return false;
+    if (entry?.job && salaryBlocked(entry.job, c)) return false;
     if (kind === 'openOnly') return !!(c.openRejected && c.verifiedEmptyContact &&
       entry?.status === 'rejected' && !entry.handoff && !entry.openOnlyStatus &&
       !s.outbox.some(item => item.key === entry.key && ['contact', 'openOnly'].includes(item.kind)));
@@ -253,7 +254,19 @@
     }
     return s;
   }
+  function dailySalaryMinimum(text) {
+    const value = String(text || '').normalize('NFKC').replace(/\s+/g, '').replace(/[–—−～]/g, '-');
+    const match = value.match(/^[¥￥]?(\d+(?:\.\d+)?)(?:元)?(?:[-~至到][¥￥]?(\d+(?:\.\d+)?))?(?:元\/?[天日]|\/[天日])$/);
+    if (!match) return null;
+    const low = Number(match[1]), high = match[2] === undefined ? low : Number(match[2]);
+    return Number.isFinite(low) && Number.isFinite(high) && high >= low ? low : null;
+  }
+  function salaryBlocked(job, c) {
+    const minimum = dailySalaryMinimum(job?.salary);
+    return c.minDailySalary > 0 && minimum !== null && minimum < c.minDailySalary;
+  }
   function hardFilter(job, c) {
+    if (salaryBlocked(job, c)) return { status: 'salaryRejected', reason: `日薪下限${dailySalaryMinimum(job.salary)}元低于设置的${c.minDailySalary}元，跳过分析及全部沟通动作` };
     const city = job.city || '';
     if (c.requiredCity && city && !city.startsWith(c.requiredCity)) return { status: 'rejected', reason: '工作地点不在' + c.requiredCity };
     if (c.requiredCity && !city) return { status: 'review', reason: '工作地点缺少可靠字段，需人工确认' };
@@ -300,5 +313,5 @@
     return compacted;
   }
   return { AI_NOTICE, PROJECT_INTRO, PROJECT_URL, aiMessage, anonymousMessage, greetingMessage, sanitizeProfile, receiptMatches, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, actionDelay, parseJSON, analysis, pair,
-    sensitive, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner, temporaryFailure, runtimeStats, compactHistory, employmentUrl, jobLink };
+    sensitive, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner, temporaryFailure, runtimeStats, compactHistory, employmentUrl, jobLink, dailySalaryMinimum, salaryBlocked };
 });

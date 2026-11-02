@@ -2,6 +2,27 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const C = require('../src/core.js');
 
+test('daily salary lower bounds recognize daily amounts and never convert monthly or ambiguous salaries', () => {
+  for (const [text, expected] of [['150-300元/天', 150], ['200～300元/日', 200], ['￥200 — ￥400元/天', 200],
+    ['180至250元/天', 180], ['200元/天', 200], ['199.5-300元/天', 199.5], ['２００－３００元／天', 200]])
+    assert.equal(C.dailySalaryMinimum(text), expected, text);
+  for (const text of ['', '面议', '5-8K', '5000-8000元/月', '20-30元/小时', '100-200元/天或5000元/月', '300-200元/天'])
+    assert.equal(C.dailySalaryMinimum(text), null, text);
+});
+test('minimum daily salary blocks analysis and both outbound action types, but equality passes', () => {
+  const c = { ...C.defaults(), autoSend: true, openRejected: true, verifiedEmptyContact: true, minDailySalary: 200 };
+  const s = C.emptyState(); s.task = C.createTask(c, Date.now());
+  const job = { salary: '150-300元/天', city: '北京' };
+  assert.equal(C.hardFilter(job, c).status, 'salaryRejected');
+  for (const [kind, status] of [['contact', 'eligible'], ['openOnly', 'rejected']])
+    assert.equal(C.canSend(s, c, Date.now(), kind, { key: 'test', job, status }), false);
+  assert.equal(C.hardFilter({ salary: '200-300元/天', city: '北京' }, c).status, 'pass');
+  assert.equal(C.hardFilter({ salary: '', city: '北京' }, c).status, 'pass');
+  assert.equal(C.hardFilter({ salary: '100-150元/天', city: '北京' }, { ...c, minDailySalary: 0 }).status, 'pass');
+  assert.equal(C.fixedConfig({ provider: 'qwen' }).minDailySalary, 0);
+  assert.throws(() => C.validateConfig({ ...C.defaults(), minDailySalary: -1 }));
+});
+
 test('manual job links require a BOSS detail URL and retain query parameters', () => {
   assert.deepEqual(C.jobLink(' https://www.zhipin.com/job_detail/job-1.html?securityId=test#old '),
     { jobId: 'job-1', url: 'https://www.zhipin.com/job_detail/job-1.html?securityId=test' });
