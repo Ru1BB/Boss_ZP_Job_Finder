@@ -2,6 +2,14 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const C = require('../src/core.js');
 
+test('manual job links require a BOSS detail URL and retain query parameters', () => {
+  assert.deepEqual(C.jobLink(' https://www.zhipin.com/job_detail/job-1.html?securityId=test#old '),
+    { jobId: 'job-1', url: 'https://www.zhipin.com/job_detail/job-1.html?securityId=test' });
+  for (const url of ['javascript:alert(1)', 'http://www.zhipin.com/job_detail/j.html',
+    'https://example.com/job_detail/j.html', 'https://u:p@www.zhipin.com/job_detail/j.html',
+    'https://www.zhipin.com/web/geek/chat', 'not a URL']) assert.throws(() => C.jobLink(url));
+});
+
 test('debug mode defaults off and cannot change send or identity permissions', () => {
   assert.equal(C.defaults().debugMode, false);
   const c = C.fixedConfig({ debugMode: true }); C.validateConfig(c);

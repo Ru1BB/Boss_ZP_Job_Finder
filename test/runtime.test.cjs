@@ -1030,3 +1030,90 @@ test('delayed browser callbacks count their real elapsed time rather than repeat
   await r.api.guardedDelay(2000, () => { guards++; });
   assert.equal(ticks, 1); assert.equal(guards, 2);
 });
+
+test('manual link queue survives page instances, rejects duplicates and never starts an idle task', () => {
+  const r = runtime();
+  r.api.enqueueJob('https://www.zhipin.com/job_detail/manual-a.html?securityId=test');
+  assert.equal(r.state(), undefined);
+  assert.throws(() => r.api.enqueueJob('https://www.zhipin.com/job_detail/manual-a.html'), /已在队列/);
+  assert.throws(() => r.api.enqueueJob('https://example.com/job_detail/manual-b.html'));
+  const refreshed = runtime({}, r.store);
+  assert.equal(refreshed.api.manualRequests().length, 1);
+  assert.equal(refreshed.api.manualRequests()[0].job.jobId, 'manual-a');
+  refreshed.api.clearQueuedJobs(); assert.equal(refreshed.api.manualRequests().length, 0);
+});
+function finishScanWait(r) {
+  while (r.state().task.nextScanAt > r.context.Date.now())
+    r.advance(Math.min(5000, r.state().task.nextScanAt - r.context.Date.now()));
+}
+test('queued links wait for the current greeting then run before search scanning with normal send checks', async () => {
+  const r = runtime({ autoSend: true, sendIntervalSeconds: 1, refreshMinSeconds: 1, refreshMaxSeconds: 1 }); r.api.start();
+  const current = chatEntry(r, 'current'); current.status = 'eligible'; current.taskId = r.state().task.id;
+  current.analysis = { greeting: '您好，我开发过前端项目' }; r.state().task.currentJob = current.job;
+  const calls = [];
+  r.context.BossAdapter.Adapter.prototype.cards = () => assert.fail('manual queue must precede search scanning');
+  workerStub(r, cmd => {
+    calls.push(cmd.type + ':' + cmd.args.job.jobId);
+    return { ok: true, data: cmd.type === 'inspect' ? { ...cmd.args.job, recruiterId: 'manual-boss', city: '北京',
+      title: '开发实习', salary: '200-300元/天', description: '前端开发', employmentType: '实习' } : { confirmed: true } };
+  });
+  r.context.GM_xmlhttpRequest = args => { respondAI(args, modelResult()); return { abort() {} }; };
+  r.api.enqueueJob('https://www.zhipin.com/job_detail/manual-a.html');
+  await r.api.pump(); assert.deepEqual(calls, ['contact:current']);
+  finishScanWait(r); await r.api.pump();
+  assert.deepEqual(calls, ['contact:current', 'inspect:manual-a']);
+  await r.api.pump();
+  assert.deepEqual(calls, ['contact:current', 'inspect:manual-a', 'contact:manual-a']);
+  const entry = Object.values(r.state().entries).find(x => x.job.jobId === 'manual-a');
+  assert.equal(entry.status, 'contacted'); assert.equal(entry.job.salary, '200-300元/天');
+  assert.equal(r.state().task.contacts, 2);
+});
+test('link submission during analysis never interrupts it or loses the next queued link', async () => {
+  const r = runtime({ refreshMinSeconds: 1, refreshMaxSeconds: 1 }); r.api.start();
+  r.context.BossAdapter.Adapter.prototype.cards = () => assert.fail('manual job does not need a search card');
+  workerStub(r, cmd => ({ ok: true, data: { ...cmd.args.job, recruiterId: 'boss', city: '北京', title: '开发实习' } }));
+  let analysisCalls = 0;
+  r.context.GM_xmlhttpRequest = args => {
+    analysisCalls++; if (analysisCalls === 1) r.api.enqueueJob('https://www.zhipin.com/job_detail/manual-b.html');
+    respondAI(args, modelResult()); return { abort() {} };
+  };
+  r.api.enqueueJob('https://www.zhipin.com/job_detail/manual-a.html');
+  await r.api.pump();
+  assert.equal(analysisCalls, 1);
+  assert.equal(r.api.manualRequests().find(x => x.job.jobId === 'manual-b').status, 'queued');
+  finishScanWait(r); await r.api.pump();
+  assert.equal(analysisCalls, 2);
+  assert.equal(r.api.manualRequests().find(x => x.job.jobId === 'manual-a').status, 'done');
+  assert.equal(r.state().task.status, 'running'); assert.equal(r.state().task.contacts, 0);
+});
+test('a current job awaiting the send interval blocks queued links without opening another page', async () => {
+  const r = runtime({ autoSend: true }); r.api.start();
+  const entry = chatEntry(r, 'current'); entry.status = 'eligible'; entry.taskId = r.state().task.id;
+  entry.analysis = { greeting: '您好，我开发过前端项目' }; r.state().task.currentJob = entry.job;
+  r.state().lastSendAt = r.context.Date.now();
+  r.api.enqueueJob('https://www.zhipin.com/job_detail/manual-a.html');
+  r.context.GM_openInTab = () => assert.fail('must finish current job and shared spacing first');
+  await r.api.pump(); assert.equal(r.api.manualRequests()[0].status, 'queued');
+  r.api.stop('用户停止', true); await r.api.pump();
+  assert.equal(r.api.manualRequests()[0].status, 'queued');
+});
+
+test('queued links with existing visible scores are skipped instead of sending twice', async () => {
+  const r = runtime(); r.api.start();
+  const entry = chatEntry(r, 'manual-a'); entry.status = 'review'; entry.analysis = { score: 70 };
+  r.api.enqueueJob('https://www.zhipin.com/job_detail/manual-a.html');
+  r.context.GM_openInTab = () => assert.fail('graded links must retain the existing dedupe');
+  await r.api.pump();
+  assert.equal(r.api.manualRequests()[0].status, 'done');
+  assert.equal(r.state().task.contacts, 0);
+});
+test('clearing waiting links preserves the active request and removes stopped processing requests', () => {
+  const r = runtime(); r.api.start();
+  r.api.enqueueJob('https://www.zhipin.com/job_detail/manual-a.html');
+  r.api.enqueueJob('https://www.zhipin.com/job_detail/manual-b.html');
+  const active = r.store.get('bossai.v1.manualJob.manual-a');
+  r.store.set('bossai.v1.manualJob.manual-a', { ...active, status: 'processing', taskId: r.state().task.id });
+  r.api.clearQueuedJobs(); assert.equal(r.api.manualRequests().length, 1);
+  r.api.stop('停止', true); r.api.clearQueuedJobs();
+  assert.equal(r.api.manualRequests().length, 0);
+});

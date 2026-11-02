@@ -233,6 +233,15 @@
       s.outbox.some(item => item.key === entry.key && item.kind === 'contact' && ['sent', 'pending', 'uncertain', 'duplicate'].includes(item.status)))) return false;
     return true;
   }
+  function jobLink(raw) {
+    let url;
+    try { url = new URL(String(raw).trim()); } catch { fail('请输入完整的BOSS职位网址'); }
+    const match = url.pathname.match(/^\/job_detail\/([A-Za-z0-9_~-]{1,200})\.html$/);
+    if (url.origin !== 'https://www.zhipin.com' || url.username || url.password || !match)
+      fail('仅支持https://www.zhipin.com/job_detail/…html职位详情链接');
+    url.hash = '';
+    return { jobId: match[1], url: url.href };
+  }
   const emptyState = () => ({ task: null, lastSendAt: 0, blockedWindow: '', entries: {}, outbox: [], logs: [] });
   function clearActivity(s) {
     s.logs = [];
@@ -291,5 +300,5 @@
     return compacted;
   }
   return { AI_NOTICE, PROJECT_INTRO, PROJECT_URL, aiMessage, anonymousMessage, greetingMessage, sanitizeProfile, receiptMatches, PROVIDERS, SCORING, scoringPrompt, scoredAnalysis, hasVisibleScore, firstContactStatus, fixedConfig, defaults, validateConfig, endpoint, networkFailure, httpFailure, schedule, randomDelay, actionDelay, parseJSON, analysis, pair,
-    sensitive, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner, temporaryFailure, runtimeStats, compactHistory, employmentUrl };
+    sensitive, decide, allowed, createTask, canSend, emptyState, clearActivity, hardFilter, reserve, publicConfig, leaseWinner, temporaryFailure, runtimeStats, compactHistory, employmentUrl, jobLink };
 });

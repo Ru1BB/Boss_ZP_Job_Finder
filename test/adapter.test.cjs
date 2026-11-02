@@ -272,6 +272,18 @@ test('observed BOSS detail structure binds the communication button to the curre
   const job = a.inspectJob(); assert.equal(job.jobId, 'job1'); assert.equal(job.contactTargetJobId, 'job1');
   assert.equal(job.identityType, 'visible-context'); assert.equal(JSON.stringify(job.identityDiagnostic).includes('not-an-identity'), false);
 });
+
+test('salary extraction returns visible text but never fails the job for an invalid salary selector', () => {
+  const a = adapter({ [P.salary]: [element({}, '300-400元/天')] });
+  assert.equal(a.readSalary(), '300-400元/天');
+  const previous = a.uniqueField.bind(a);
+  a.p.salary = '[invalid';
+  a.uniqueField = selector => { if (selector === '[invalid') throw new Error('bad selector'); return previous(selector); };
+  assert.equal(a.readSalary(), '300-400元/天');
+  a.doc.selectors = { [P.detail]: [element({}, '这是完整的岗位描述，包含足够文字用于验证可选薪资不会中断读取。')] };
+  assert.equal(a.inspectJob().salary, '');
+  assert.equal(a.inspectJob().jobId, 'job1');
+});
 test('old default contact selector is migrated to the current button variant', () => {
   assert.ok(adapter({}, { contact: '.op-btn-chat' }).p.contact.includes('.btn-startchat'));
 });

@@ -1,6 +1,6 @@
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.8';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.9';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -335,12 +335,30 @@
   }
   async function analyze(c, job) { return retryAI(() => analyzeOnce(c, job), '职位分析'); }
   async function analyzeOnce(c, job) {
-    const result = C.scoredAnalysis(await requestAI(c, systemBase + C.scoringPrompt + '返回 {"scoreBreakdown":{"skills":数字,"experience":数字,"requirements":数字,"preferences":数字,"bonus":数字},"hasBonusRequirements":布尔值,"suitable":布尔值,"uncertain":布尔值,"reason":"分项依据与主要扣分理由","doubts":["疑点"],"greeting":"招呼及真实经历介绍","greetingEvidence":["简历原文逐字摘录"]}。信息不足时如实列出疑点，但 suitable 和 uncertain 仅供参考，不参与发送拦截；BOSS搜索已限定所选实习或全职类型，职位通过城市条件后，只按脚本加总的 score 是否达到用户阈值决定是否进入发送队列。无论评分与标记如何，都必须生成有正文的非空招呼，不得因疑点拒绝生成。招呼优先100到180字：表达岗位意向，介绍1到2项与核心工作相关的真实个人经历，写清做过什么、使用的技术及实际承担的内容，最后表达沟通意愿。没有高度相关经历时选择简历中关联较弱但可迁移的真实经历，明确适用边界，不冒充直接经验；没有项目经历就介绍已有技能或学习经历，不虚构项目、工作年限、职责、规模、成果数字或技能熟练度，不把AI辅助编程扩写成模型训练或Agent/RAG工程经验。greetingEvidence返回1到3条简历中逐字存在的依据，每条4到200字，必须支持招呼中的经历介绍。招呼不得出现个人姓名、联系方式、面试确认或薪资承诺。',
+    const result = C.scoredAnalysis(await requestAI(c, systemBase + C.scoringPrompt + '返回 {"scoreBreakdown":{"skills":数字,"experience":数字,"requirements":数字,"preferences":数字,"bonus":数字},"hasBonusRequirements":布尔值,"suitable":布尔值,"uncertain":布尔值,"reason":"分项依据与主要扣分理由","doubts":["疑点"],"greeting":"招呼及真实经历介绍","greetingEvidence":["简历原文逐字摘录"]}。信息不足时如实列出疑点，但 suitable 和 uncertain 仅供参考，不参与发送拦截；' + (job.manualLink ? '该岗位来自用户输入的职位链接，未经过搜索页工作类型筛选；结合岗位原文与用户当前求职类型（' + (c.internshipOnly ? '实习' : '全职') + '）评估偏好匹配，不得假定它已符合搜索类型' : 'BOSS搜索已限定所选实习或全职类型') + '，职位通过城市条件后，只按脚本加总的 score 是否达到用户阈值决定是否进入发送队列。无论评分与标记如何，都必须生成有正文的非空招呼，不得因疑点拒绝生成。招呼优先100到180字：表达岗位意向，介绍1到2项与核心工作相关的真实个人经历，写清做过什么、使用的技术及实际承担的内容，最后表达沟通意愿。没有高度相关经历时选择简历中关联较弱但可迁移的真实经历，明确适用边界，不冒充直接经验；没有项目经历就介绍已有技能或学习经历，不虚构项目、工作年限、职责、规模、成果数字或技能熟练度，不把AI辅助编程扩写成模型训练或Agent/RAG工程经验。greetingEvidence返回1到3条简历中逐字存在的依据，每条4到200字，必须支持招呼中的经历介绍。招呼不得出现个人姓名、联系方式、面试确认或薪资承诺。',
       { resume: c.resume, preferences: c.preferences, screeningInstructions: c.screeningPrompt, greetingInstructions: c.greetingPrompt, job: jobForAI(job) }, '职位分析'), c.resume, { recoverEvidence: true });
     if (result.evidenceRecovered && state().task?.status === 'running' && owned()) {
       const s = state(); log(s, '招呼依据不足：已改为引用真实简历片段或中性招呼，继续任务'); persist(s);
     }
     result.greeting = C.greetingMessage(result.greeting, c.resume, job); return result;
+  }
+  const manualRequests = () => GM_listValues().filter(k => k.startsWith(prefix + 'manualJob.'))
+    .map(k => ({ key: k.slice(prefix.length), ...GM_getValue(k) })).sort((a, b) => a.at - b.at);
+  function enqueueJob(raw) {
+    const job = C.jobLink(raw), key = 'manualJob.' + job.jobId;
+    const previous = get(key);
+    if (previous && ['queued', 'processing'].includes(previous.status)) throw new Error('该岗位链接已在队列中');
+    if (manualRequests().filter(x => ['queued', 'processing'].includes(x.status)).length >= 100) throw new Error('链接队列最多100项，请先处理或清空等待链接');
+    put(key, { job, at: Date.now(), status: 'queued' });
+    for (const item of manualRequests().filter(x => !['queued', 'processing'].includes(x.status)).slice(0, -100)) GM_deleteValue(prefix + item.key);
+    logMessage = state().task?.status === 'running' ? '链接已加入，当前岗位流程结束后优先处理' : '链接已保存，开始任务后处理；不会自动启动';
+    return job;
+  }
+  function clearQueuedJobs() {
+    const task = state().task;
+    for (const item of manualRequests()) if (item.status === 'queued' ||
+      item.status === 'processing' && (task?.status !== 'running' || item.taskId !== task.id)) GM_deleteValue(prefix + item.key);
+    logMessage = '已清空等待链接，正在处理的岗位不受影响';
   }
   async function guardedDelay(ms, guard, onElapsed = () => {}) {
     const deadline = Date.now() + Math.max(0, ms);
@@ -460,6 +478,7 @@
     const c = config(), s = state();
     if (!still(taskId) || !C.canSend(s, c, Date.now(), kind, s.entries[entry.key])) return false;
     const item = C.reserve(s, c, Date.now(), kind, s.entries[entry.key], payload);
+    s.task.currentJob = s.entries[entry.key].job;
     delete s.entries[entry.key].pendingReply; persist(s);
     const data = await command(kind, { job: entry.job, retryApproved: !!entry.retryApproved, ...payload }, taskId, item.id);
     if (!still(taskId)) return true;
@@ -634,7 +653,34 @@
         log(s, '正在同步BOSS求职类型：' + s.task.employmentMode + '，载入后继续原任务'); persist(s); location.assign(employmentTarget); return;
       }
       if (s.task.employmentSync) { delete s.task.employmentSync; log(s, 'BOSS求职类型已确认：' + (c.internshipOnly ? '实习' : '全职')); persist(s); }
-      if (c.switchCategoryOnExhausted && s.task.currentCategory && !s.task.categoryPending) {
+      let manualCard = null;
+      const waitingLinks = manualRequests().filter(x => x.status === 'queued' || x.status === 'processing' && x.taskId !== taskId);
+      const linksPending = waitingLinks.length > 0 || !!s.task.currentManualKey;
+      if (linksPending) {
+        const current = s.task.currentJob;
+        const entry = current && Object.values(s.entries).find(e => e.job?.jobId === current.jobId && e.taskId === taskId);
+        const waitingSend = entry?.status === 'eligible' && !entry.handoff && c.autoSend && s.task.contacts < c.maxContacts;
+        const waitingOpen = entry?.status === 'rejected' && C.canSend(s, c, Date.now(), 'openOnly', entry);
+        if (entry && !entry.retry && !waitingSend && !waitingOpen) {
+          if (s.task.currentManualKey) {
+            const request = get(s.task.currentManualKey);
+            if (request) put(s.task.currentManualKey, { ...request, status: 'done', result: entry.status });
+          }
+          delete s.task.currentJob; delete s.task.currentManualKey; persist(s);
+        } else if (current && !entry) manualCard = current;
+        if (entry?.retry && entry.retry.at > Date.now()) return;
+        if (!s.task.currentJob && waitingLinks.length) {
+          const request = waitingLinks[0];
+          if (C.hasVisibleScore(s.entries, request.job.jobId) || s.outbox.some(x => x.key && s.entries[x.key]?.job?.jobId === request.job.jobId && ['sent', 'pending', 'uncertain', 'duplicate'].includes(x.status))) {
+            put(request.key, { ...get(request.key), status: 'done', result: '已有评分或沟通记录，按去重规则跳过' });
+            log(s, '输入链接已有评分或沟通记录，跳过重复处理'); persist(s); return;
+          }
+          put(request.key, { ...get(request.key), status: 'processing', taskId });
+          s.task.currentJob = request.job; s.task.currentManualKey = request.key;
+          manualCard = request.job; log(s, '开始处理用户输入的岗位链接'); persist(s);
+        }
+      }
+      if (!manualCard && c.switchCategoryOnExhausted && s.task.currentCategory && !s.task.categoryPending) {
         try {
           const choices = adapter.categoryChoices(c), active = choices.filter(item => item.active);
           if (active.length === 1 && active[0].label !== s.task.currentCategory && choices.some(item => item.label === s.task.currentCategory)) {
@@ -647,7 +693,7 @@
           log(s, '类别恢复跳过：' + error.message); persist(s);
         }
       }
-      if (s.task.categoryPending) {
+      if (!manualCard && s.task.categoryPending) {
         const pending = s.task.categoryPending;
         try {
           if (Date.now() - pending.at < 1500) return;
@@ -664,32 +710,34 @@
           log(s, '岗位类别切换未确认，改为刷新续跑：' + error.message); persist(s); return;
         }
       }
-      const sendRetry = Object.values(s.entries).find(e => e.retry?.action === 'send' && e.retry.taskId === taskId && !e.handoff && e.retry.at <= Date.now());
-      if (sendRetry && c.autoSend && Date.now() >= (s.lastSendAt || 0) + c.sendIntervalSeconds * 1000) {
+      const sendRetry = Object.values(s.entries).find(e => (!linksPending || !s.task.currentJob || e.job?.jobId === s.task.currentJob.jobId) && e.retry?.action === 'send' && e.retry.taskId === taskId && !e.handoff && e.retry.at <= Date.now());
+      if (!manualCard && sendRetry && c.autoSend && Date.now() >= (s.lastSendAt || 0) + c.sendIntervalSeconds * 1000) {
         const item = s.outbox.find(x => x.id === sendRetry.retry.sendId && x.status === 'pending' && x.taskId === taskId);
         if (!item) { delete sendRetry.retry; persist(s); return; }
+        s.task.currentJob = sendRetry.job; persist(s);
         actionContext = { key: sendRetry.key, job: sendRetry.job, kind: item.kind === 'contact' ? '首聊发送' : '仅打开沟通' };
         const data = await command(item.kind, { job: sendRetry.job, retryApproved: !!sendRetry.retryApproved, ...item.payload }, taskId, item.id);
         if (still(taskId)) { const fresh = state(); delete fresh.entries[item.key].retry; settle(fresh, item, data); persist(fresh); }
         return;
       }
       // Process one outbound action at a time; all actions share the persisted spacing gate.
-      const eligible = Object.values(s.entries).find(e => e.status === 'eligible' && e.taskId === taskId &&
+      const eligible = !manualCard && Object.values(s.entries).find(e => (!linksPending || !s.task.currentJob || e.job?.jobId === s.task.currentJob.jobId) && e.status === 'eligible' && e.taskId === taskId &&
         typeof e.analysis?.greeting === 'string' && e.analysis.greeting.trim() && !C.sensitive(e.analysis.greeting) &&
         C.canSend(s, c, Date.now(), 'contact', e));
       if (eligible) {
         actionContext = { key: eligible.key, job: eligible.job, kind: '首聊发送' };
         await dispatchEntry(eligible, 'contact', { text: eligible.analysis.greeting }, taskId); return;
       }
-      const rejected = Object.values(s.entries).find(e => e.status === 'rejected' && C.canSend(s, c, Date.now(), 'openOnly', e) &&
+      const rejected = !manualCard && Object.values(s.entries).find(e => (!linksPending || !s.task.currentJob || e.job?.jobId === s.task.currentJob.jobId) && e.status === 'rejected' && C.canSend(s, c, Date.now(), 'openOnly', e) &&
         (e.taskId === taskId || adapter.cards().some(card => card.jobId === e.job.jobId)));
       if (rejected) {
         actionContext = { key: rejected.key, job: rejected.job, kind: '仅打开沟通' };
         await dispatchEntry(rejected, 'openOnly', {}, taskId); return;
       }
+      if (linksPending && s.task.currentJob && !manualCard && !Object.values(s.entries).some(e => e.job?.jobId === s.task.currentJob.jobId && e.retry?.action === 'inspect')) return;
       s = state();
       if (Date.now() < s.task.nextScanAt) return;
-      if (s.task.exhausted) {
+      if (!manualCard && s.task.exhausted) {
         s.task.exhausted = false; s.task.emptyRounds = 0;
         if (c.switchCategoryOnExhausted) {
           try {
@@ -707,16 +755,16 @@
         s.task.refreshWanted = true;
         log(s, '搜索结果已遍历，刷新搜索页并继续当前任务，保留计数及去重记录');
       }
-      if (s.task.refreshWanted) {
+      if (!manualCard && s.task.refreshWanted) {
         s.task.refreshWanted = false; persist(s); location.reload(); return;
       }
-      const cards = adapter.cards(); let skipped = 0;
+      const cards = manualCard ? [] : adapter.cards(); let skipped = 0;
       for (const candidate of cards) if (!s.task.visited.includes(candidate.jobId) && C.hasVisibleScore(s.entries, candidate.jobId)) {
         s.task.visited.push(candidate.jobId); skipped++;
       }
       if (skipped) { log(s, `跳过${skipped}个列表中已有评分的职位，不重复读取或调用AI`); persist(s); }
       const readRetries = Object.values(s.entries).filter(e => e.retry?.action === 'inspect' && e.retry.taskId === taskId && !e.handoff);
-      const card = readRetries.find(e => e.retry.at <= Date.now())?.job ||
+      const card = manualCard || readRetries.find(e => e.retry.at <= Date.now())?.job ||
         cards.find(j => !s.task.visited.includes(j.jobId) && !readRetries.some(e => e.job.jobId === j.jobId));
       if (!card) {
         if (readRetries.length) { s.task.nextScanAt = Math.min(...readRetries.map(e => e.retry.at)); persist(s); return; }
@@ -725,10 +773,12 @@
         if (result === 'end' || s.task.emptyRounds >= 3) { s.task.exhausted = true; log(s, '本轮搜索结果已遍历，随机等待后切换类别或刷新继续搜索'); }
         s.task.nextScanAt = Date.now() + C.randomDelay(c); persist(s); return;
       }
+      s.task.currentJob = card; persist(s);
       actionContext = { job: card, kind: '职位读取' };
       const job = await command('inspect', { job: card }, taskId);
       if (!still(taskId)) return;
-      job.searchEmploymentType = c.internshipOnly ? '实习' : '全职';
+      job.manualLink = !!state().task.currentManualKey;
+      job.searchEmploymentType = job.manualLink ? '用户指定链接，未经过搜索页类型筛选；当前偏好：' + (c.internshipOnly ? '实习' : '全职') : c.internshipOnly ? '实习' : '全职';
       const key = job.recruiterId ? C.pair(job) : 'unidentified:' + job.jobId;
       const previous = state().entries[key], retryApproved = !!previous?.retryApproved;
       const recovered = state(); let clearedRetry = false;
@@ -997,6 +1047,7 @@
       <div id="status" class="status"></div><div class="actions"><button class="primary" id="start">开始新任务</button><button class="danger" id="stop">立即停止</button><button id="clearActivity">清空日志与待处理</button><button id="clearWorker">清理残留工作页</button></div>
       <p class="muted">清空会停止当前任务、取消待处理发送并清空列表；保留内部去重记录、计数及配置，避免重复联系。</p>
       <p class="muted">仅筛选职位并发送首次招呼，不巡检私信或自动回复。Key 保存在油猴本地存储，不会随配置导出。后台冻结可能延迟启动；到停止时间不补发。</p>
+      <details open><summary>指定岗位链接</summary><input id="manualJobUrl" type="url" placeholder="粘贴https://www.zhipin.com/job_detail/…html"><div class="actions"><button id="enqueueJob">加入链接队列</button><button id="clearQueuedJobs">清空等待链接</button></div><p class="muted">当前岗位流程结束后优先处理，仍遵守评分、授权、额度、间隔和去重。未运行时保存，开始任务后处理。</p><pre id="manualQueue"></pre></details>
       <form id="form"><div class="row"><div><label>供应商</label><select name="provider"><option value="qwen">Qwen</option><option value="deepseek">DeepSeek</option></select></div><div><label>模型名称（固定）</label><input name="model" readonly></div></div>
       <label>Base URL（固定，随供应商切换）</label><input name="baseUrl" type="url" readonly>
       <label>API Key</label><input name="apiKey" type="password" autocomplete="new-password" spellcheck="false" placeholder="仅本地保存，不输出日志">
@@ -1058,6 +1109,8 @@
     q('stop').onclick = () => { put('stopRequest', { at: Date.now(), reason: '用户停止任务', manual: true }); activeRequest?.abort?.(); notify('停止指令已发出，等待当前执行标签页确认'); };
     q('start').onclick = action(() => requestStart());
     q('clearActivity').onclick = action(() => { requestClearActivity(); render(); });
+    q('enqueueJob').onclick = action(() => { enqueueJob(q('manualJobUrl').value); q('manualJobUrl').value = ''; render(); });
+    q('clearQueuedJobs').onclick = action(() => { clearQueuedJobs(); render(); });
     q('clearWorker').onclick = action(async () => { notify('正在核对和关闭残留工作页……'); notify(await clearWorkerBlock()); });
     let importEpoch = 0;
     q('resumeImport').onclick = action(() => {
@@ -1222,13 +1275,16 @@
     const stats = C.runtimeStats(s), taskLabel = { running: '运行中', paused: '已暂停', stopped: '已停止' };
     const cleanup = s.maintenance ? `\n上次自动清理：${fmt(s.maintenance.at)}，移除${s.maintenance.removed}项过期标记、精简${s.maintenance.compacted}条旧发送正文` : '';
     q('status').textContent = `${execution} · ${c.autoSend ? '自动发送模式' : '试运行，不发送'}\n求职类型：${c.internshipOnly ? '实习' : '全职'}\n任务：${taskLabel[t?.status] || '未启动'} · 首聊预约 ${t?.contacts || 0}/${c.maxContacts}（含待核实）\n累计：已评分${stats.analyzed} · 待发送${stats.eligible} · 确认发送${stats.sent} · 发送待核实${stats.uncertain} · 临时重试${stats.retrying} · 待人工${stats.manual}\n下次刷新/扫描：${t?.exhausted ? '已遍历，等待刷新：' + fmt(t?.nextScanAt) : fmt(t?.nextScanAt)}\n停止：${fmt(t?.endAt)}\n${currentActivity()}\n最近情况：${logMessage || s.logs[0]?.message || '暂无记录'}${waiting}${cleanup}`;
+    q('manualQueue').textContent = manualRequests().filter(x => ['queued', 'processing'].includes(x.status)).map(x =>
+      (x.status === 'processing' && t?.status === 'running' && x.taskId === t.id ? '处理中：' : '等待：') + x.job.url).join('\n') || '暂无等待链接';
+    q('manualQueue').style.whiteSpace = 'pre-wrap';
     const entries = q('entries'); entries.replaceChildren();
     const labels = { eligible: '待发送/试运行预览', review: '待人工确认', rejected: '不匹配', existing: '已有沟通，跳过', contacted: '已联系', uncertain: '发送待核实', retryable: '发送前中断，待重新评估' };
     for (const entry of Object.values(s.entries).filter(entry => !entry.hidden).slice(-60).reverse()) {
       const el = document.createElement('div'); el.className = 'entry';
       const scoreMaxima = entry.analysis?.scoreMaxima || (entry.analysis?.scoringVersion === 1 ? { skills: 40, experience: 25, requirements: 20, preferences: 5, bonus: 10 } : Object.fromEntries(C.SCORING.map(x => [x.key, x.max])));
       const a = document.createElement('a'); a.textContent = entry.job.title || entry.job.jobId; a.href = new Adapter().safeUrl(entry.job.url).href; a.target = '_blank'; a.rel = 'noopener noreferrer'; el.append(a);
-      for (const text of [`${labels[entry.status] || entry.status}${entry.handoff ? ' · 待人工处理' : ''} ${entry.analysis ? entry.analysis.score + '分' : ''}`,
+      for (const text of ['薪资：' + (entry.job.salary || '未读取到（不影响运行）'), `${labels[entry.status] || entry.status}${entry.handoff ? ' · 待人工处理' : ''} ${entry.analysis ? entry.analysis.score + '分' : ''}`,
         entry.analysis ? entry.analysis.scoreBreakdown && [1, 2].includes(entry.analysis.scoringVersion) ? '评分构成' + (entry.analysis.scoringVersion === 1 ? '（旧权重）' : '') + '：' + C.SCORING.map(x => x.label + ' ' + entry.analysis.scoreBreakdown[x.key] + '/' + scoreMaxima[x.key]).join('；') + (entry.analysis.hasBonusRequirements ? '' : '（岗位无加分条款，末项中性计分）') : '评分方式：旧版综合评分，未应用分项权重' : '',
         entry.analysis?.reason, entry.analysis?.doubts?.join('；'), entry.note,
         entry.analysis?.greeting ? '招呼预览：' + C.greetingMessage(entry.analysis.greeting, c.resume, entry.job) : '']) {
@@ -1247,7 +1303,7 @@
     q('logs').textContent = s.logs.slice(0, 30).map(x => fmt(x.at) + ' ' + x.message).join('\n'); q('logs').style.whiteSpace = 'pre-wrap';
   }
   if (typeof module === 'object' && module.exports) {
-    module.exports = { guardedDelay, renewLease, releaseLease, start, requestStart, stop, pump, analyze, testConnection, approveContactRetry, settle, requestAI, command, closeManagedWorker, clearWorkerBlock, disableAutoSend, requestClearActivity, completeClearActivity, quarantinePending, currentActivity, generateResume, maintainRuntime, debugReport }; return;
+    module.exports = { enqueueJob, clearQueuedJobs, manualRequests, guardedDelay, renewLease, releaseLease, start, requestStart, stop, pump, analyze, testConnection, approveContactRetry, settle, requestAI, command, closeManagedWorker, clearWorkerBlock, disableAutoSend, requestClearActivity, completeClearActivity, quarantinePending, currentActivity, generateResume, maintainRuntime, debugReport }; return;
   }
   refreshDebugTools(); setInterval(refreshDebugTools, 1000);
   if (workerId) {

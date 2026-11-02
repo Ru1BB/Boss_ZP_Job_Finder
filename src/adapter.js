@@ -154,6 +154,13 @@
         return [id, { jobId: id, url: u.href, summary: (a.closest(this.p.card)?.innerText || a.innerText || '').slice(0, 10000) }];
       }).filter(([id]) => id)).values()];
     }
+    readSalary() {
+      for (const selector of [...new Set([this.p.salary, '.job-banner .salary', '.job-banner .job-salary'])]) {
+        try { const text = this.uniqueField(selector); if (text) return text.slice(0, 200); }
+        catch { /* Salary is optional: a broken selector must not interrupt job processing. */ }
+      }
+      return '';
+    }
     inspectJob() {
       this.health();
       const jobId = this.jobId(this.doc.location.href);
@@ -172,7 +179,7 @@
       return { jobId, ...recruiter, url: this.doc.location.href.split('#')[0],
         title: this.uniqueField(this.p.title).slice(0, 200), description: description.slice(0, 20000),
         employmentType: (this.text(this.p.employmentType) || (/实习/.test(this.text(this.p.title)) ? '实习' : '')).slice(0, 100), city: this.uniqueField(this.p.city).slice(0, 100),
-        salary: this.uniqueField(this.p.salary).slice(0, 200),
+        salary: this.readSalary(),
         contactTargetJobId,
         alreadyContacted: /继续沟通|已沟通/.test(contactText) };
     }
