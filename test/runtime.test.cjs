@@ -687,12 +687,17 @@ test('page commands close owned tabs before another page is opened', async () =>
   assert.equal(opened.length, 3); assert.ok(opened.every(tab => tab.closed));
 });
 test('first contact preparation and inspection both open in background', async () => {
-  const r = runtime(); r.api.start();
+  const r = runtime({ beforeFillSeconds: 3, beforeSendSeconds: 5, refreshMinSeconds: 1, refreshMaxSeconds: 1 }); r.api.start();
   const options = [];
   r.context.GM_getTabs = callback => callback({});
   r.context.GM_openInTab = (url, setting) => {
     options.push(setting);
     const cmd = r.store.get('bossai.v1.command');
+    if (cmd.type === 'contact') {
+      assert.equal(cmd.fillDelay, 4000);
+      assert.equal(cmd.sendDelay, 12000);
+      assert.equal(cmd.timeoutMs, 106000);
+    }
     r.store.set('bossai.v1.result.' + cmd.id, { ok: true, data: {} });
     return { closed: false, close() { this.closed = true; } };
   };

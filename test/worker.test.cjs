@@ -104,12 +104,14 @@ test('first-contact diagnostics distinguish elapsed waits, click and confirmed r
   assert.equal(r.result.ok, true);
   assert.equal(r.result.data.confirmed, true);
   const progress = r.store.get('bossai.v1.command').progress.map(x => x.message);
-  assert.equal(progress.length, 8);
-  assert.match(progress[0], /填入前等待已结束/);
-  assert.match(progress[2], /发送前等待已结束/);
-  assert.match(progress[5], /准备点击发送/);
-  assert.match(progress[6], /已执行点击发送/);
-  assert.match(progress[7], /回执确认成功/);
+  assert.equal(progress.length, 10);
+  assert.match(progress[0], /填入招呼前等待.*0.5 秒/);
+  assert.match(progress[3], /填入后发送前等待.*0.5 秒/);
+  assert.match(progress[1], /填入前等待已结束/);
+  assert.match(progress[4], /发送前等待已结束/);
+  assert.match(progress[7], /准备点击发送/);
+  assert.match(progress[8], /已执行点击发送/);
+  assert.match(progress[9], /回执确认成功/);
   assert.equal(r.events.filter(x => x === 'send').length, 1);
 });
 
@@ -318,8 +320,8 @@ test('elapsed send wait activates chat before running post-wait guards', async (
   const r = await run({ hidden: true, sendDelay: 1000, focusDependentHealth: true });
   assert.equal(r.result.data.confirmed, true);
   const progress = r.store.get('bossai.v1.command').progress;
-  assert.match(progress[2].message, /等待已结束，立即切换/);
-  assert.match(progress[3].message, /已切到前台/);
+  assert.match(progress[4].message, /等待已结束，立即切换/);
+  assert.match(progress[5].message, /已切到前台/);
   assert.equal(r.events.filter(x => x === 'focus').length, 1);
   assert.equal(r.events.filter(x => x === 'send').length, 1);
 });

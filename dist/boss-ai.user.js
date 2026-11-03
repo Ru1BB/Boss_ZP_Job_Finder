@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS AI 求职助手
 // @namespace    local.boss-ai
-// @version      0.2.10
+// @version      0.2.11
 // @updateURL    https://7355608.site/userscripts/boss-ai.meta.js
 // @downloadURL  https://7355608.site/userscripts/boss-ai.user.js
 // @description  AI 职位筛选、受控沟通与北京时间调度；请先校准页面
@@ -1219,7 +1219,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
 
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.10';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.11';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -1612,14 +1612,15 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     if (old && !await closeManagedWorker(old.id, workerTabId === old.id ? workerTab : null)) throw new Error('上一个脚本工作页尚未关闭，已暂停，不再开新页；请关闭旧工作页后点击“清理残留工作页”');
     if (!still(taskId)) throw new Error('任务已停止');
     if (type === 'inspect') {
-      logMessage = '打开职位前等待';
-      await guardedDelay(C.actionDelay(config(), 'beforeOpenSeconds'), () => { if (!still(taskId)) throw new Error('任务停止，已取消打开职位'); });
+      const delay = C.actionDelay(config(), 'beforeOpenSeconds');
+      const progress = state(); log(progress, `打开职位前等待：计划 ${delay / 1000} 秒`); persist(progress);
+      await guardedDelay(delay, () => { if (!still(taskId)) throw new Error('任务停止，已取消打开职位'); });
     }
     const id = crypto.randomUUID(), wid = crypto.randomUUID();
     const cmd = { id, workerId: wid, type, args, taskId, sendId, owner, createdAt: Date.now(), phase: 'new' };
     if (type === 'contact') {
       cmd.fillDelay = C.actionDelay(config(), 'beforeFillSeconds');
-      cmd.sendDelay = C.actionDelay(config(), 'beforeSendSeconds');
+      cmd.sendDelay = 2 * C.actionDelay(config(), 'beforeSendSeconds');
     }
     cmd.timeoutMs = 90000 + (cmd.fillDelay || 0) + (cmd.sendDelay || 0);
     if (sendId) put('sendStage.' + sendId, { stage: 'prepared', commandId: id, at: Date.now() });
@@ -1670,7 +1671,11 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
   // Also consumes persisted receipts from old versions; never dispatches legacy actions.
   function settle(s, item, data) {
     const live = s.outbox.find(x => x.id === item.id), entry = s.entries[item.key];
-    if (['contact', 'openOnly'].includes(item.kind)) s.task.nextScanAt = Math.max(s.task.nextScanAt || 0, Date.now() + C.actionDelay(config(), 'nextJobSeconds'));
+    if (['contact', 'openOnly'].includes(item.kind)) {
+      const now = Date.now();
+      s.task.nextScanAt = Math.max(s.task.nextScanAt || 0, now + C.actionDelay(config(), 'nextJobSeconds'));
+      log(s, `处理下一岗位前等待：计划 ${(s.task.nextScanAt - now) / 1000} 秒`);
+    }
     if (item.kind === 'openOnly') {
       live.status = data.opened ? 'opened' : data.existing ? 'skipped' : 'uncertain';
       entry.openOnlyStatus = live.status; entry.handoff = true;
@@ -1923,7 +1928,9 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
           if (Date.now() - pending.at < 1500) return;
           if (adapter.categoryChanged(pending, c)) {
             s.task.currentCategory = pending.label;
-            delete s.task.categoryPending; s.task.emptyRounds = 0; s.task.nextScanAt = Date.now() + C.randomDelay(c);
+            delete s.task.categoryPending; s.task.emptyRounds = 0;
+            const scanDelay = C.randomDelay(c); s.task.nextScanAt = Date.now() + scanDelay;
+            log(s, `类别切换后等待扫描：计划 ${scanDelay / 1000} 秒`);
             log(s, '岗位类别已切换：' + pending.label + '；保留任务计数及去重记录，等待列表加载'); persist(s); return;
           }
           if (Date.now() - pending.at < 15000) return;
@@ -1995,7 +2002,9 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
         const result = adapter.advance();
         s.task.emptyRounds = (s.task.emptyRounds || 0) + 1;
         if (result === 'end' || s.task.emptyRounds >= 3) { s.task.exhausted = true; log(s, '本轮搜索结果已遍历，随机等待后切换类别或刷新继续搜索'); }
-        s.task.nextScanAt = Date.now() + C.randomDelay(c); persist(s); return;
+        const scanDelay = C.randomDelay(c);
+        s.task.nextScanAt = Date.now() + scanDelay;
+        log(s, `${s.task.exhausted ? '切换类别或刷新前等待' : '下一轮扫描前等待'}：计划 ${scanDelay / 1000} 秒`); persist(s); return;
       }
       s.task.currentJob = card; persist(s);
       actionContext = { job: card, kind: '职位读取' };
@@ -2024,7 +2033,9 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
         s.entries[key] = { key, job, analysis: result, status, taskId, createdAt: Date.now(), ...(retryApproved ? { retryApproved: true, retryApprovedAt: previous.retryApprovedAt } : {}),
           note: filter.reason || (!job.recruiterId ? (job.identityDiagnostic?.status === 'conflicting' ? '招聘者身份信息互相冲突，请在职位详情页运行只读诊断' : '尚未识别招聘者：需要平台 ID，或唯一的公司与招聘者信息；请在职位详情页运行只读诊断') : status === 'review' ? '需人工核对' : '') };
       }
-      s.task.nextScanAt = Date.now() + C.actionDelay(c, 'nextJobSeconds'); s.task.refreshWanted = true;
+      const nextJobDelay = C.actionDelay(c, 'nextJobSeconds');
+      s.task.nextScanAt = Date.now() + nextJobDelay; s.task.refreshWanted = true;
+      log(s, `处理下一岗位前等待：计划 ${nextJobDelay / 1000} 秒`);
       log(s, `已读取职位：${job.title || job.jobId}；${s.entries[key].status}`); persist(s);
     } catch (e) {
       if (owned() && state().task?.id === taskId && state().task.status === 'running') {
@@ -2091,12 +2102,12 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     }
   }
   function workerPhase(cmd, phase, extra = {}) { Object.assign(cmd, extra, { phase }); put('command', cmd); }
-  function workerProgress(cmd, phase, message) {
+  function workerProgress(cmd, phase, message, extra = {}) {
     if (get('command')?.id !== cmd.id || get('cancel.' + cmd.id)) {
       const error = new Error('当前工作指令已取消或被替换'); error.code = 'COMMAND_CANCELLED'; throw error;
     }
     cmd.progress = [...(cmd.progress || []), { at: Date.now(), message }];
-    workerPhase(cmd, phase, { phaseAt: Date.now() });
+    workerPhase(cmd, phase, { ...extra, phaseAt: Date.now() });
   }
   function sendStage(cmd, stage) {
     if (cmd.sendId) put('sendStage.' + cmd.sendId, { commandId: cmd.id, stage, at: Date.now() });
@@ -2196,7 +2207,8 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       const text = C.greetingMessage(cmd.args.text, c.resume, job);
       if (!text || C.sensitive(text)) throw new Error('消息为空或涉及关键事项');
       const before = history.map(m => m.id);
-      workerPhase(cmd, 'waitingFill', { waitUntil: Date.now() + (cmd.fillDelay || 0) });
+      workerProgress(cmd, 'waitingFill', `填入招呼前等待：计划 ${(cmd.fillDelay || 0) / 1000} 秒`,
+        { waitUntil: Date.now() + (cmd.fillDelay || 0) });
       await guardedDelay(cmd.fillDelay || 0, () => stableWorkerGuard(cmd, true),
         () => workerProgress(cmd, 'checkingFill', '填入前等待已结束，开始检查执行权和聊天记录'));
       adapter.assertChatReady();
@@ -2211,7 +2223,8 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       await stableWorkerGuard(cmd, true); adapter.assertChatReady();
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id) throw new Error('填写期间会话发生变化，草稿留待人工处理');
       if (!adapter.editorMatches(text)) throw new Error('输入框内容与拟发送消息不一致，取消发送（已等待编辑器同步，草稿保留；请核对换行或网页是否改写内容）');
-      workerPhase(cmd, 'waitingSend', { waitUntil: Date.now() + (cmd.sendDelay || 0) });
+      workerProgress(cmd, 'waitingSend', `填入后发送前等待：计划 ${(cmd.sendDelay || 0) / 1000} 秒`,
+        { waitUntil: Date.now() + (cmd.sendDelay || 0) });
       await guardedDelay(cmd.sendDelay || 0, () => stableWorkerGuard(cmd, true), () => {
         workerProgress(cmd, 'focusingSend', '发送前等待已结束，立即切换消息工作页到前台');
         window.focus();
