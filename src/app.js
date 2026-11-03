@@ -1,6 +1,6 @@
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.13';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.14';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -400,10 +400,9 @@
     const id = crypto.randomUUID(), wid = crypto.randomUUID();
     const cmd = { id, workerId: wid, type, args, taskId, sendId, owner, createdAt: Date.now(), phase: 'new' };
     if (type === 'contact') {
-      cmd.fillDelay = C.actionDelay(config(), 'beforeFillSeconds');
       cmd.sendDelay = 2 * C.actionDelay(config(), 'beforeSendSeconds');
     }
-    cmd.timeoutMs = 90000 + (cmd.fillDelay || 0) + (cmd.sendDelay || 0);
+    cmd.timeoutMs = 90000 + (cmd.sendDelay || 0);
     if (sendId) put('sendStage.' + sendId, { stage: 'prepared', commandId: id, at: Date.now() });
     put('activeWorker', { id: wid, commandId: id, createdAt: Date.now() });
     put('command', cmd);
@@ -835,7 +834,7 @@
 
   // Worker has its own tab and session identity. Only the leader may issue commands.
   let workerBusy = false, workerCloseAttempts = 0, lastWorkerCloseAt = 0;
-  let fillCheckCommand = null;
+  let workerBanner;
   function closeWorkerSelf() {
     if (!workerId || workerCloseAttempts >= 3 || workerCloseAttempts && Date.now() - lastWorkerCloseAt < 700) return;
     workerCloseAttempts++; lastWorkerCloseAt = Date.now();
@@ -922,18 +921,7 @@
       !C.allowed(state(), config(), Date.now()) || Date.now() - current.createdAt > (current.timeoutMs || 90000)) {
       closeWorkerSelf(); return;
     }
-    if (workerBusy) {
-      const checking = fillCheckCommand;
-      if (checking?.id === current.id && current.phase === 'checkingFill' && !checking.fillFocusAttempted &&
-          document.hidden && Date.now() - current.phaseAt >= 8000 && !get('consumed.' + current.id)) {
-        try {
-          workerGuard(current, true, false);
-          workerProgress(checking, 'checkingFill', '填入前检查超过8秒未推进，尝试激活聊天页一次', { fillFocusAttempted: true });
-          window.focus();
-        } catch { /* The original flow still handles its guard failure or deadline. */ }
-      }
-      return;
-    }
+    if (workerBusy) return;
     if (!workerOwns()) return;
     put('workerHeartbeat', { id: workerId, at: Date.now() });
     const cmd = get('command');
@@ -1004,41 +992,37 @@
       const text = C.greetingMessage(cmd.args.text, c.resume, job);
       if (!text || C.sensitive(text)) throw new Error('消息为空或涉及关键事项');
       const before = history.map(m => m.id);
-      workerProgress(cmd, 'waitingFill', `填入招呼前等待：计划 ${(cmd.fillDelay || 0) / 1000} 秒`,
-        { waitUntil: Date.now() + (cmd.fillDelay || 0) });
-      await guardedDelay(cmd.fillDelay || 0, () => stableWorkerGuard(cmd, true),
-        () => {
-          workerProgress(cmd, 'checkingFill', '填入前等待已结束，开始检查执行权');
-          fillCheckCommand = cmd;
-        });
+      workerProgress(cmd, 'checkingFill', '开始检查填入前执行权');
+      await stableWorkerGuard(cmd, true);
       workerProgress(cmd, 'checkingFill', '填入前执行权检查通过');
       adapter.assertChatReady();
       workerProgress(cmd, 'checkingFill', '开始读取填入前的聊天历史');
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id) throw new Error('等待填入期间会话发生变化，取消旧消息');
       workerProgress(cmd, 'checkingFill', '填入前聊天历史读取完成，记录未变化');
-      fillCheckCommand = null;
       sendStage(cmd, 'drafting');
       workerProgress(cmd, 'drafting', '正在填入招呼并检查编辑器同步');
-      adapter.fill(text); await sleep(150);
-      // Allow a bounded UI render delay; never rewrite the draft or retry a send.
-      for (let i = 0; i < 5 && !adapter.editorMatches(text); i++) {
-        await stableWorkerGuard(cmd, true); await sleep(100);
-      }
-      await stableWorkerGuard(cmd, true); adapter.assertChatReady();
-      if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id) throw new Error('填写期间会话发生变化，草稿留待人工处理');
-      if (!adapter.editorMatches(text)) throw new Error('输入框内容与拟发送消息不一致，取消发送（已等待编辑器同步，草稿保留；请核对换行或网页是否改写内容）');
-      workerProgress(cmd, 'waitingSend', `填入后发送前等待：计划 ${(cmd.sendDelay || 0) / 1000} 秒`,
-        { waitUntil: Date.now() + (cmd.sendDelay || 0) });
-      await guardedDelay(cmd.sendDelay || 0, () => stableWorkerGuard(cmd, true), () => {
-        workerProgress(cmd, 'focusingSend', '发送前等待已结束，立即切换消息工作页到前台');
-        window.focus();
-      });
+      adapter.fill(text);
+      workerProgress(cmd, 'focusingSend', '招呼已填入，立即切换消息工作页到前台');
+      window.focus();
       const focusDeadline = Date.now() + 5000;
       while (document.hidden && Date.now() < focusDeadline) {
         await sleep(500); await stableWorkerGuard(cmd, true);
       }
       if (document.hidden) throw new Error('消息工作页未能切换到前台，已取消发送并保留草稿');
-      workerProgress(cmd, 'checkingSend', '消息页已切到前台，开始检查聊天记录和草稿');
+      const switchedAt = Date.now(), delay = cmd.sendDelay || 0, waitUntil = switchedAt + delay;
+      const time = new Date(switchedAt).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+      workerBanner.textContent += ` · 切到前台 ${time}（北京时间） · 预计等待 ${delay / 1000} 秒`;
+      workerProgress(cmd, 'waitingSend', `消息页已切到前台 ${time}，预计等待 ${delay / 1000} 秒`, { waitUntil });
+      await stableWorkerGuard(cmd, true);
+      await sleep(150);
+      for (let i = 0; i < 5 && !adapter.editorMatches(text); i++) {
+        await stableWorkerGuard(cmd, true); await sleep(100);
+      }
+      await stableWorkerGuard(cmd, true); adapter.assertChatReady();
+      if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id) throw new Error('填写期间会话发生变化，草稿留待人工处理');
+      if (!adapter.editorMatches(text)) throw new Error('输入框内容与拟发送消息不一致，取消发送（已等待编辑器同步，草稿保留）');
+      await guardedDelay(Math.max(0, waitUntil - Date.now()), () => stableWorkerGuard(cmd, true));
+      workerProgress(cmd, 'checkingSend', '发送前等待结束，开始检查聊天记录和草稿');
       adapter.assertChatReady();
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id || !adapter.editorMatches(text)) throw new Error('等待发送期间会话或草稿发生变化，取消发送');
       workerProgress(cmd, 'locatingSend', '聊天记录和草稿检查通过，正在定位发送按钮');
@@ -1069,7 +1053,7 @@
       }
       workerFinish(cmd, null, e);
     }
-    finally { fillCheckCommand = null; workerBusy = false; }
+    finally { workerBusy = false; }
   }
 
   // Shadow DOM keeps CSS and user input isolated from normal site styling.
@@ -1108,9 +1092,9 @@
       <p class="muted">自动读取页面左上角及“更多”中的类别，按页面顺序点选轮换，无需输入名称；末尾轮换回第一个。顶部和折叠菜单中的同名副本合并，优先点击可见入口。不清空已读和发送记录、不重置额度，不点击新增或编辑求职期望。切换未确认时刷新续跑；仍按所选城市和实习/全职类型搜索。</p>
       <div class="row"><div><label>开始时间</label><input type="time" name="startTime"></div><div><label>停止时间（可跨午夜）</label><input type="time" name="stopTime"></div></div>
       <div class="row"><div><label>每次任务最多首聊次数</label><input type="number" name="maxContacts" min="1" max="500"></div><div><label>招呼发送最小间隔 / 秒</label><input type="number" name="sendIntervalSeconds" min="1"></div></div>
-      <div class="row"><div><label>打开职位前等待 / 秒</label><input type="number" name="beforeOpenSeconds" min="0" max="3600"></div><div><label>填入招呼前等待 / 秒</label><input type="number" name="beforeFillSeconds" min="0" max="3600"></div></div>
+      <label>打开职位前等待 / 秒</label><input type="number" name="beforeOpenSeconds" min="0" max="3600">
       <div class="row"><div><label>填入后多久点击发送 / 秒</label><input type="number" name="beforeSendSeconds" min="0" max="3600"></div><div><label>多久处理下一个岗位 / 秒</label><input type="number" name="nextJobSeconds" min="0" max="3600"></div></div>
-      <p class="muted">上述四项为基础等待，每次分别加上下面范围内独立抽取的随机秒数；默认基础等待0秒。共用随机范围也用于刷新与岗位扫描。填入及发送等待仅用于首次文字招呼；所有发送仍受最小发送间隔约束。等待中可立即停止，到停止时间取消；等待后重新检查消息记录和草稿。</p>
+      <p class="muted">上述三项为基础等待，默认0秒。每次独立抽取随机秒数。填入招呼后立即切到沟通页，发送前等待为（基础秒数＋随机秒数）×2。所有发送仍受最小发送间隔约束。等待中可立即停止，到停止时间取消。等待后重新检查消息记录和草稿。</p>
       <div class="row"><div><label>共用随机延迟最小 / 秒</label><input type="number" name="refreshMinSeconds" min="1" max="3600"></div><div><label>共用随机延迟最大 / 秒</label><input type="number" name="refreshMaxSeconds" min="1" max="3600"></div></div>
       <label>AI 请求等待上限 / 秒</label><input type="number" name="aiTimeoutSeconds" min="30" max="600"><p class="muted">默认180秒，可设30–600秒；用于等待完整AI响应，与刷新及发送间隔独立。服务商端的超时不一定随此设置延长。超时按最多3次AI尝试处理，连续失败才暂停；不重试发送点击。</p>
       <p class="muted">默认每轮独立随机等待 10–60 秒；读取完一个职位后刷新搜索页。翻页和滚动也使用随机等待，不重复分析已读职位。AI/加载耗时另计，不保证精确刷新时刻。</p>
@@ -1294,8 +1278,8 @@
     if (cmd?.taskId === s.task.id) {
       const labels = { inspect: '读取职位详情', contact: '首聊流程', openOnly: '仅打开沟通' };
       const elapsed = Math.max(0, Math.floor((Date.now() - cmd.createdAt) / 1000));
-      const phases = { new: '载入工作页', detail: '载入详情', opening: '打开目标会话', chat: '读取聊天', waitingFill: '等待填入招呼', waitingSend: '填入后等待发送', checkingFill: '等待已结束，检查填入条件', drafting: '填写及同步编辑器', checkingSend: '等待已结束，检查发送条件', focusingSend: '发送前切换消息页到前台', locatingSend: '定位发送按钮', clickingSend: '准备点击发送', verifyingReceipt: '已点击发送，核对回执', receiptDone: '回执检查完成' };
-      const stageWait = ['waitingFill', 'waitingSend'].includes(cmd.phase) ? ` · 本阶段计划${Math.ceil((cmd.phase === 'waitingFill' ? cmd.fillDelay || 0 : cmd.sendDelay || 0) / 1000)}秒（含随机延迟），剩余约${Math.max(0, Math.ceil(((cmd.waitUntil || Date.now()) - Date.now()) / 1000))}秒${Date.now() > (cmd.waitUntil || Date.now()) + 5000 ? ' · 倒计时已到，尚未收到工作页继续执行的进度，可能存在后台延迟' : ''}` : '';
+      const phases = { new: '载入工作页', detail: '载入详情', opening: '打开目标会话', chat: '读取聊天', waitingSend: '填入后等待发送', checkingFill: '检查填入条件', drafting: '填写及同步编辑器', checkingSend: '等待已结束，检查发送条件', focusingSend: '填入后切换消息页到前台', locatingSend: '定位发送按钮', clickingSend: '准备点击发送', verifyingReceipt: '已点击发送，核对回执', receiptDone: '回执检查完成' };
+      const stageWait = cmd.phase === 'waitingSend' ? ` · 本阶段计划${Math.ceil((cmd.sendDelay || 0) / 1000)}秒（含随机延迟），剩余约${Math.max(0, Math.ceil(((cmd.waitUntil || Date.now()) - Date.now()) / 1000))}秒${Date.now() > (cmd.waitUntil || Date.now()) + 5000 ? ' · 倒计时已到，尚未收到工作页继续执行的进度，可能存在后台延迟' : ''}` : '';
       return (cmd.healthCheck ? '页面异常自动复查中 · ' : '') + `当前动作：${labels[cmd.type] || '页面操作'} · ${phases[cmd.phase] || cmd.phase} · 已等待${elapsed}秒 / 上限${Math.ceil((cmd.timeoutMs || 90000) / 1000)}秒（整个流程）` + stageWait +
         (cmd.phase !== 'new' || get('workerRegistered.' + cmd.workerId) ? '' : ' · 等待后台工作页加载并注册脚本');
     }
@@ -1351,7 +1335,7 @@
   }
   refreshDebugTools(); setInterval(refreshDebugTools, 1000);
   if (workerId) {
-    const banner = document.createElement('div'); banner.textContent = `AI 求职工作标签页 v${VERSION} · 请勿手动切换会话或输入消息 · 停止请在主搜索页操作`;
+    const banner = workerBanner = document.createElement('div'); banner.textContent = `AI 求职工作标签页 v${VERSION} · 请勿手动切换会话或输入消息 · 停止请在主搜索页操作`;
     banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:8px;background:#fff2cf;color:#593b00;z-index:2147483647;font:14px system-ui';
     document.documentElement.append(banner);
     GM_getTab(tab => {

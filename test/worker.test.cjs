@@ -10,7 +10,7 @@ async function run(options = {}) {
   const c = { ...C.defaults(), minDailySalary: options.minDailySalary || 0, autoSend: true, verifiedEmptyContact: !!options.verifiedEmptyContact, verifyChatWindow: options.verifyChatWindow !== false, resumeName: '测试简历.pdf', profile: { verifiedContact: true, firstContactOpensEmptyChat: true, verifiedReply: true, verifiedResume: true } };
   const s = C.emptyState(); s.task = C.createTask(c, now); s.task.leaseToken = 'leader';
   const cmd = { id: 'cmd', workerId: 'worker', taskId: s.task.id, sendId: 'send', owner: 'leader', createdAt: now,
-    fillDelay: options.fillDelay || 0, sendDelay: options.sendDelay || 0, type: options.type || 'contact', phase: options.phase || 'chat', savedDetailUrl: options.savedDetailUrl || '', args: { job, text: '您好，我有相关项目经验', historyTail: 'in1', inboundId: 'in1', resumeName: c.resumeName } };
+    sendDelay: options.sendDelay || 0, type: options.type || 'contact', phase: options.phase || 'chat', savedDetailUrl: options.savedDetailUrl || '', args: { job, text: '您好，我有相关项目经验', historyTail: 'in1', inboundId: 'in1', resumeName: c.resumeName } };
   s.outbox.push({ id: 'send', status: 'pending', taskId: s.task.id });
   if (options.reopenAttempt) cmd.args.reopenAttempt = true;
   if (options.retryApproved) { cmd.args.retryApproved = true; s.entries[C.pair(job)] = { job, retryApproved: true }; }
@@ -64,13 +64,13 @@ async function run(options = {}) {
   if (options.retired) store.set('bossai.v1.workerRetired.worker', { at: now });
   if (options.expired) s.task.endAt = now - 1;
   if (options.expiredMain) store.set('bossai.v1.lease.leader', { owner: 'leader', claimedAt: now - 20000, expires: now - 1 });
-  let offset = 0;
+  let offset = 0, banner;
   class Clock extends Date { static now() { return now + offset; } }
   const context = { BossCore: C, BossAdapter: { Adapter: FakeAdapter, DEFAULT_PROFILE: p },
     crypto: require('node:crypto').webcrypto, URL, URLSearchParams, Date: Clock, console,
     sessionStorage: { getItem: () => 'worker', setItem() {} },
     location: { href: options.locationHref || 'https://www.zhipin.com/web/geek/chat', hash: '', reload() { events.push('reloadWorker'); }, assign(url) { events.push('navigate:' + url); } },
-    document: { hidden: !!options.hidden, createElement: () => ({ style: {} }), documentElement: { append() {} } },
+    document: { hidden: !!options.hidden, createElement: () => ({ style: {} }), documentElement: { append(node) { banner = node; } } },
     GM_getValue: (k, fallback = null) => store.has(k) ? structuredClone(store.get(k)) : fallback,
     GM_setValue: (k, v) => store.set(k, structuredClone(v)), GM_listValues: () => [...store.keys()], GM_deleteValue: k => store.delete(k),
     setInterval: f => callbacks.push(f), setTimeout: (f, ms) => {
@@ -81,13 +81,6 @@ async function run(options = {}) {
           events.push('freeze'); offset += 16000;
           if (options.competingWorker) store.set('bossai.v1.workerLease.worker.competitor', { owner: 'competitor', claimedAt: now, expires: now + 60000 });
         } else offset += 500;
-      }
-      if (ms === 500 && options.stalledFillCheck && !events.includes('stalledFillCheck') &&
-          store.get('bossai.v1.command')?.phase === 'checkingFill') {
-        events.push('stalledFillCheck');
-        offset += 8500;
-        void callbacks.at(-1)();
-        void callbacks.at(-1)();
       }
       f();
     }, Event: class {},
@@ -103,42 +96,21 @@ async function run(options = {}) {
     offset += options.tickMs || 2000;
     for (const fn of callbacks) await fn();
   }
-  return { events, result: store.get('bossai.v1.result.cmd'), store, history };
+  return { events, banner: banner.textContent, result: store.get('bossai.v1.result.cmd'), store, history };
 }
 
-test('first-contact diagnostics distinguish elapsed waits, click and confirmed receipt', async () => {
-  const r = await run({ fillDelay: 500, sendDelay: 500 });
-  assert.equal(r.result.ok, true);
+test('greeting fills, focuses, and shows the full send wait with a second-precision time', async () => {
+  const r = await run({ hidden: true, sendDelay: 500 });
   assert.equal(r.result.data.confirmed, true);
-  const progress = r.store.get('bossai.v1.command').progress.map(x => x.message);
-  assert.equal(progress.length, 13);
-  assert.match(progress[2], /执行权检查通过/);
-  assert.match(progress[3], /开始读取填入前/);
-  assert.match(progress[4], /聊天历史读取完成/);
-  assert.match(progress[0], /填入招呼前等待.*0.5 秒/);
-  assert.match(progress[6], /填入后发送前等待.*0.5 秒/);
-  assert.match(progress[1], /填入前等待已结束/);
-  assert.match(progress[7], /发送前等待已结束/);
-  assert.match(progress[10], /准备点击发送/);
-  assert.match(progress[11], /已执行点击发送/);
-  assert.match(progress[12], /回执确认成功/);
-  assert.equal(r.events.filter(x => x === 'send').length, 1);
-});
-
-test('a stalled background fill check focuses once before drafting and stops safely on cancellation', async () => {
-  for (const stopOnFocus of [false, true]) {
-    const r = await run({ hidden: true, fillDelay: 500, freezeDuringDelay: true, stalledFillCheck: true, stopOnFocus });
-    assert.ok(r.events.includes('stalledFillCheck'));
-    const progress = r.store.get('bossai.v1.command').progress;
-    assert.equal(progress.filter(x => /尝试激活聊天页一次/.test(x.message)).length, 1);
-    if (stopOnFocus) {
-      assert.equal(r.events.includes('fill'), false);
-      assert.equal(r.events.includes('send'), false);
-    } else {
-      assert.ok(r.events.indexOf('focus') < r.events.indexOf('fill'));
-      assert.equal(r.events.filter(x => x === 'send').length, 1);
-    }
-  }
+  const progress = r.store.get('bossai.v1.command').progress;
+  assert.match(progress[1].message, /执行权检查通过/);
+  assert.match(progress[2].message, /开始读取填入前/);
+  assert.match(progress[3].message, /聊天历史读取完成/);
+  assert.match(progress[5].message, /招呼已填入，立即切换/);
+  assert.match(progress[6].message, /已切到前台.*预计等待 0.5 秒/);
+  assert.match(r.banner, /切到前台 [0-9]{2}:[0-9]{2}:[0-9]{2}.*预计等待 0.5 秒/);
+  assert.ok(progress[9].at - progress[6].at >= 500);
+  assert.deepEqual(r.events.filter(x => ['fill', 'focus', 'send'].includes(x)), ['fill', 'focus', 'send']);
 });
 
 test('failed receipt diagnostics never report success or repeat the click', async () => {
@@ -149,7 +121,7 @@ test('failed receipt diagnostics never report success or repeat the click', asyn
 });
 
 test('foreground sender maintains a live main lease across long action waits', async () => {
-  const r = await run({ fillDelay: 40000, sendDelay: 40000 });
+  const r = await run({ sendDelay: 80000 });
   assert.equal(r.result.data.confirmed, true);
   const cmd = r.store.get('bossai.v1.command');
   assert.ok(r.store.get('bossai.v1.lease.leader').expires > cmd.createdAt + 80000);
@@ -286,10 +258,8 @@ test('attachment mismatch and no explicit request never send files', async () =>
 
 
 test('configurable delays still allow one send but stop prevents filling or clicking', async () => {
-  const normal = await run({ fillDelay: 1000, sendDelay: 1000 });
+  const normal = await run({ sendDelay: 1000 });
   assert.equal(normal.result.ok, true); assert.equal(normal.events.filter(e => e === 'send').length, 1);
-  const beforeFill = await run({ fillDelay: 1000, stopDuringDelay: true });
-  assert.equal(beforeFill.events.includes('fill'), false); assert.equal(beforeFill.events.includes('send'), false);
   const beforeSend = await run({ sendDelay: 1000, stopDuringDelay: true });
   assert.equal(beforeSend.events.includes('fill'), true); assert.equal(beforeSend.events.includes('send'), false);
 });
@@ -316,15 +286,15 @@ test('worker refresh during fill or send waiting never reopens a job or repeats 
 
 
 test('a background-delayed worker re-elects before sending instead of reporting task stopped', async () => {
-  const r = await run({ fillDelay: 1000, freezeDuringDelay: true });
+  const r = await run({ sendDelay: 1000, freezeDuringDelay: true });
   assert.equal(r.result.ok, true); assert.equal(r.result.data.confirmed, true);
   assert.equal(r.events.filter(e => e === 'send').length, 1); assert.ok(r.events.includes('freeze'));
 });
 
 test('a competing worker prevents sending and returns a precise local error', async () => {
-  const r = await run({ fillDelay: 1000, freezeDuringDelay: true, competingWorker: true });
+  const r = await run({ sendDelay: 1000, freezeDuringDelay: true, competingWorker: true });
   assert.equal(r.result.ok, false); assert.equal(r.result.code, 'WORKER_LEASE_UNAVAILABLE');
-  assert.equal(r.events.includes('send'), false); assert.equal(r.events.includes('fill'), false);
+  assert.equal(r.events.includes('send'), false); assert.equal(r.events.includes('fill'), true);
 });
 
 
@@ -336,20 +306,11 @@ test('a two-second send delay completes after one late callback instead of multi
 });
 
 test('focus occurs only after drafting and before the send click', async () => {
-  const r = await run({ hidden: true, fillDelay: 1000, sendDelay: 1000 });
+  const r = await run({ hidden: true, sendDelay: 1000 });
   assert.equal(r.result.data.confirmed, true);
   assert.ok(r.events.indexOf('fill') < r.events.indexOf('focus'));
   assert.ok(r.events.indexOf('focus') < r.events.indexOf('send'));
   assert.equal(r.events.filter(x => x === 'focus').length, 1);
-});
-test('elapsed send wait activates chat before running post-wait guards', async () => {
-  const r = await run({ hidden: true, sendDelay: 1000, focusDependentHealth: true });
-  assert.equal(r.result.data.confirmed, true);
-  const progress = r.store.get('bossai.v1.command').progress;
-  assert.match(progress[7].message, /等待已结束，立即切换/);
-  assert.match(progress[8].message, /已切到前台/);
-  assert.equal(r.events.filter(x => x === 'focus').length, 1);
-  assert.equal(r.events.filter(x => x === 'send').length, 1);
 });
 test('failed focus or stop during focus prevents sending', async () => {
   for (const options of [{ hidden: true, focusFails: true }, { hidden: true, stopOnFocus: true }]) {

@@ -363,10 +363,10 @@ test('multi-tab lease elects one deterministic winner and expires stale tabs', (
 
 
 
-test('all four action delays share the configured random range with an independent base', () => {
+test('all configured action delays share the configured random range with an independent base', () => {
   const c = { ...C.defaults(), refreshMinSeconds: 10, refreshMaxSeconds: 60,
-    beforeOpenSeconds: 2, beforeFillSeconds: 3, beforeSendSeconds: 4, nextJobSeconds: 5 };
-  for (const key of ['beforeOpenSeconds', 'beforeFillSeconds', 'beforeSendSeconds', 'nextJobSeconds']) {
+    beforeOpenSeconds: 2, beforeSendSeconds: 4, nextJobSeconds: 5 };
+  for (const key of ['beforeOpenSeconds', 'beforeSendSeconds', 'nextJobSeconds']) {
     assert.equal(C.actionDelay(c, key, () => 0), (c[key] + 10) * 1000);
     assert.equal(C.actionDelay(c, key, () => .999), (c[key] + 60) * 1000);
     assert.throws(() => C.validateConfig({ ...c, [key]: -1 }));

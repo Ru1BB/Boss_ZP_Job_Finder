@@ -694,9 +694,9 @@ test('first contact preparation and inspection both open in background', async (
     options.push(setting);
     const cmd = r.store.get('bossai.v1.command');
     if (cmd.type === 'contact') {
-      assert.equal(cmd.fillDelay, 4000);
+      assert.equal(cmd.fillDelay, undefined);
       assert.equal(cmd.sendDelay, 12000);
-      assert.equal(cmd.timeoutMs, 106000);
+      assert.equal(cmd.timeoutMs, 102000);
     }
     r.store.set('bossai.v1.result.' + cmd.id, { ok: true, data: {} });
     return { closed: false, close() { this.closed = true; } };

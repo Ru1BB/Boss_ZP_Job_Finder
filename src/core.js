@@ -29,7 +29,7 @@
     greetingPrompt: '用自然、简短的中文打招呼，突出真实匹配点，不编造经历，不承诺薪资或面试。',
     threshold: 80, minDailySalary: 0, maxContacts: 50, sendIntervalSeconds: 180, aiTimeoutSeconds: 180,
     refreshMinSeconds: 10, refreshMaxSeconds: 60,
-    beforeOpenSeconds: 0, beforeFillSeconds: 0, beforeSendSeconds: 0, nextJobSeconds: 0,
+    beforeOpenSeconds: 0, beforeSendSeconds: 0, nextJobSeconds: 0,
     scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false,
     openRejected: true, verifiedEmptyContact: false,
     switchCategoryOnExhausted: true, debugMode: false,
@@ -79,6 +79,7 @@
     const preset = PROVIDERS[provider], c = { ...defaults(), ...raw, ...preset, provider };
     delete c.maxReplies; delete c.resumeName; c.profile = sanitizeProfile(c.profile);
     delete c.verifyChatWindow; // Retired option: chat identity is no longer compared.
+    delete c.beforeFillSeconds;
     delete c.categoryLabels; // Retire the old manually entered category list.
     // Do not carry credentials from a previously configured different service to a new destination.
     if (raw.baseUrl && raw.baseUrl !== preset.baseUrl) { c.apiKey = ''; c.autoSend = false; }
@@ -91,7 +92,7 @@
     }
     for (const key of ['autoSend', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact', 'switchCategoryOnExhausted', 'debugMode']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
     for (const [key, min, max] of [['threshold', 0, 100], ['minDailySalary', 0, 1000000], ['maxContacts', 1, 500],
-      ['beforeOpenSeconds', 0, 3600], ['beforeFillSeconds', 0, 3600], ['beforeSendSeconds', 0, 3600], ['nextJobSeconds', 0, 3600],
+      ['beforeOpenSeconds', 0, 3600], ['beforeSendSeconds', 0, 3600], ['nextJobSeconds', 0, 3600],
       ['sendIntervalSeconds', 1, 86400], ['refreshMinSeconds', 1, 3600],
       ['refreshMaxSeconds', 1, 3600], ['aiTimeoutSeconds', 30, 600]]) {
       if (!Number.isInteger(c[key]) || c[key] < min || c[key] > max) fail(`配置 ${key} 必须是 ${min}–${max} 的整数`);
