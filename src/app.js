@@ -1,6 +1,6 @@
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.11';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.12';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -49,8 +49,8 @@
     if (!owned()) throw new Error('执行权已转移，停止当前操作');
     put('state', s);
   }
-  function log(s, message) {
-    s.logs.unshift({ at: Date.now(), message }); s.logs = s.logs.slice(0, 120);
+  function log(s, message, at = Date.now()) {
+    s.logs.unshift({ at, message }); s.logs = s.logs.slice(0, 120);
     logMessage = message;
   }
   function still(taskId) {
@@ -427,7 +427,7 @@
           const events = liveCommand.progress || [];
           if (events.length > reported) {
             const progressState = state();
-            for (const event of events.slice(reported)) log(progressState, event.message);
+            for (const event of events.slice(reported)) log(progressState, event.message, event.at);
             reported = events.length; persist(progressState);
           }
         }
@@ -831,6 +831,7 @@
 
   // Worker has its own tab and session identity. Only the leader may issue commands.
   let workerBusy = false, workerCloseAttempts = 0, lastWorkerCloseAt = 0;
+  let fillCheckCommand = null;
   function closeWorkerSelf() {
     if (!workerId || workerCloseAttempts >= 3 || workerCloseAttempts && Date.now() - lastWorkerCloseAt < 700) return;
     workerCloseAttempts++; lastWorkerCloseAt = Date.now();
@@ -917,7 +918,18 @@
       !C.allowed(state(), config(), Date.now()) || Date.now() - current.createdAt > (current.timeoutMs || 90000)) {
       closeWorkerSelf(); return;
     }
-    if (workerBusy) return;
+    if (workerBusy) {
+      const checking = fillCheckCommand;
+      if (checking?.id === current.id && current.phase === 'checkingFill' && !checking.fillFocusAttempted &&
+          document.hidden && Date.now() - current.phaseAt >= 8000 && !get('consumed.' + current.id)) {
+        try {
+          workerGuard(current, true, false);
+          workerProgress(checking, 'checkingFill', '填入前检查超过8秒未推进，尝试激活聊天页一次', { fillFocusAttempted: true });
+          window.focus();
+        } catch { /* The original flow still handles its guard failure or deadline. */ }
+      }
+      return;
+    }
     if (!workerOwns()) return;
     put('workerHeartbeat', { id: workerId, at: Date.now() });
     const cmd = get('command');
@@ -991,9 +1003,16 @@
       workerProgress(cmd, 'waitingFill', `填入招呼前等待：计划 ${(cmd.fillDelay || 0) / 1000} 秒`,
         { waitUntil: Date.now() + (cmd.fillDelay || 0) });
       await guardedDelay(cmd.fillDelay || 0, () => stableWorkerGuard(cmd, true),
-        () => workerProgress(cmd, 'checkingFill', '填入前等待已结束，开始检查执行权和聊天记录'));
+        () => {
+          workerProgress(cmd, 'checkingFill', '填入前等待已结束，开始检查执行权');
+          fillCheckCommand = cmd;
+        });
+      workerProgress(cmd, 'checkingFill', '填入前执行权检查通过');
       adapter.assertChatReady();
+      workerProgress(cmd, 'checkingFill', '开始读取填入前的聊天历史');
       if (adapter.history(job).at(-1)?.id !== history.at(-1)?.id) throw new Error('等待填入期间会话发生变化，取消旧消息');
+      workerProgress(cmd, 'checkingFill', '填入前聊天历史读取完成，记录未变化');
+      fillCheckCommand = null;
       sendStage(cmd, 'drafting');
       workerProgress(cmd, 'drafting', '正在填入招呼并检查编辑器同步');
       adapter.fill(text); await sleep(150);
@@ -1046,7 +1065,7 @@
       }
       workerFinish(cmd, null, e);
     }
-    finally { workerBusy = false; }
+    finally { fillCheckCommand = null; workerBusy = false; }
   }
 
   // Shadow DOM keeps CSS and user input isolated from normal site styling.

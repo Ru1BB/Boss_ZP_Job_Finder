@@ -82,6 +82,13 @@ async function run(options = {}) {
           if (options.competingWorker) store.set('bossai.v1.workerLease.worker.competitor', { owner: 'competitor', claimedAt: now, expires: now + 60000 });
         } else offset += 500;
       }
+      if (ms === 500 && options.stalledFillCheck && !events.includes('stalledFillCheck') &&
+          store.get('bossai.v1.command')?.phase === 'checkingFill') {
+        events.push('stalledFillCheck');
+        offset += 8500;
+        void callbacks.at(-1)();
+        void callbacks.at(-1)();
+      }
       f();
     }, Event: class {},
     window: { focus() { events.push('focus'); if (!options.focusFails) context.document.hidden = false; if (options.stopOnFocus) store.set('bossai.v1.stopRequest', { manual: true }); }, close() { events.push('closeWorker'); if (options.closeThrows) throw new Error('close failed'); } },
@@ -104,15 +111,34 @@ test('first-contact diagnostics distinguish elapsed waits, click and confirmed r
   assert.equal(r.result.ok, true);
   assert.equal(r.result.data.confirmed, true);
   const progress = r.store.get('bossai.v1.command').progress.map(x => x.message);
-  assert.equal(progress.length, 10);
+  assert.equal(progress.length, 13);
+  assert.match(progress[2], /执行权检查通过/);
+  assert.match(progress[3], /开始读取填入前/);
+  assert.match(progress[4], /聊天历史读取完成/);
   assert.match(progress[0], /填入招呼前等待.*0.5 秒/);
-  assert.match(progress[3], /填入后发送前等待.*0.5 秒/);
+  assert.match(progress[6], /填入后发送前等待.*0.5 秒/);
   assert.match(progress[1], /填入前等待已结束/);
-  assert.match(progress[4], /发送前等待已结束/);
-  assert.match(progress[7], /准备点击发送/);
-  assert.match(progress[8], /已执行点击发送/);
-  assert.match(progress[9], /回执确认成功/);
+  assert.match(progress[7], /发送前等待已结束/);
+  assert.match(progress[10], /准备点击发送/);
+  assert.match(progress[11], /已执行点击发送/);
+  assert.match(progress[12], /回执确认成功/);
   assert.equal(r.events.filter(x => x === 'send').length, 1);
+});
+
+test('a stalled background fill check focuses once before drafting and stops safely on cancellation', async () => {
+  for (const stopOnFocus of [false, true]) {
+    const r = await run({ hidden: true, fillDelay: 500, freezeDuringDelay: true, stalledFillCheck: true, stopOnFocus });
+    assert.ok(r.events.includes('stalledFillCheck'));
+    const progress = r.store.get('bossai.v1.command').progress;
+    assert.equal(progress.filter(x => /尝试激活聊天页一次/.test(x.message)).length, 1);
+    if (stopOnFocus) {
+      assert.equal(r.events.includes('fill'), false);
+      assert.equal(r.events.includes('send'), false);
+    } else {
+      assert.ok(r.events.indexOf('focus') < r.events.indexOf('fill'));
+      assert.equal(r.events.filter(x => x === 'send').length, 1);
+    }
+  }
 });
 
 test('failed receipt diagnostics never report success or repeat the click', async () => {
@@ -320,8 +346,8 @@ test('elapsed send wait activates chat before running post-wait guards', async (
   const r = await run({ hidden: true, sendDelay: 1000, focusDependentHealth: true });
   assert.equal(r.result.data.confirmed, true);
   const progress = r.store.get('bossai.v1.command').progress;
-  assert.match(progress[4].message, /等待已结束，立即切换/);
-  assert.match(progress[5].message, /已切到前台/);
+  assert.match(progress[7].message, /等待已结束，立即切换/);
+  assert.match(progress[8].message, /已切到前台/);
   assert.equal(r.events.filter(x => x === 'focus').length, 1);
   assert.equal(r.events.filter(x => x === 'send').length, 1);
 });
