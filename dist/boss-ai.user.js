@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS AI 求职助手
 // @namespace    local.boss-ai
-// @version      0.2.12
+// @version      0.2.13
 // @updateURL    https://7355608.site/userscripts/boss-ai.meta.js
 // @downloadURL  https://7355608.site/userscripts/boss-ai.user.js
 // @description  AI 职位筛选、受控沟通与北京时间调度；请先校准页面
@@ -1219,7 +1219,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
 
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.12';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.13';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -1661,11 +1661,15 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
         await sleep(500);
       }
       const last = get('command');
-      put('cancel.' + id, true); throw new Error('页面操作超时；最后阶段：' + (last?.progress?.at(-1)?.message || last?.phase || '未知') + '；如涉及发送则状态待核实，不会自动重发');
+      put('cancel.' + id, true);
+      const error = new Error('页面操作超时；最后阶段：' + (last?.progress?.at(-1)?.message || last?.phase || '未知'));
+      error.code = 'COMMAND_EXPIRED';
+      throw error;
     } finally {
       const closed = await closeManagedWorker(wid, handle);
       workerTab = null; workerTabId = null;
       if (!closed) throw new Error('脚本工作页关闭未确认，已暂停以防页面累积；请手动关闭工作页后重试');
+      if (get('command')?.id === id) put('command', null);
     }
   }
   // Also consumes persisted receipts from old versions; never dispatches legacy actions.
@@ -1730,7 +1734,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     quarantinePending(s, error.message, key);
     const entry = s.entries[key] || { key, job, status: 'review', taskId, createdAt: Date.now() };
     entry.handoff = true; delete entry.retry; delete entry.pendingReply; delete entry.hidden;
-    entry.note = '已跳过本次' + context.kind + '，待人工处理：' + error.message;
+    if (error.code !== 'COMMAND_EXPIRED' || !pending) entry.note = '已跳过本次' + context.kind + '，待人工处理：' + error.message;
     s.entries[key] = entry;
     if (context.kind === '职位读取') {
       if (!s.task.visited.includes(job.jobId)) s.task.visited.push(job.jobId);

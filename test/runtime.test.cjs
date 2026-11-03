@@ -1153,3 +1153,34 @@ test('a salary threshold also removes a previously scored job from pending commu
   assert.equal(r.state().entries[entry.key].status, 'salaryRejected');
   assert.equal(r.state().task.contacts, 0);
 });
+
+test('command timeout mentioning execution rights skips only that job and preserves send evidence', async () => {
+  for (const stage of ['opening', 'clicked']) {
+    const r = runtime({ autoSend: true, sendIntervalSeconds: 1, refreshMinSeconds: 1, refreshMaxSeconds: 1 }); r.api.start();
+    const entry = chatEntry(r, 'timeout-' + stage);
+    entry.status = 'eligible'; entry.taskId = r.state().task.id; entry.analysis = { greeting: '您好，我有项目经验' };
+    let opened = 0;
+    r.context.GM_getTabs = cb => cb({});
+    r.context.setTimeout = (fn, ms) => { r.advance(ms === 500 ? 5000 : ms); queueMicrotask(fn); };
+    r.context.GM_openInTab = () => {
+      opened++;
+      const cmd = r.store.get('bossai.v1.command');
+      if (opened === 1) {
+        cmd.progress = [{ at: r.context.Date.now(), message: '填入前等待已结束，开始检查执行权' }];
+        r.store.set('bossai.v1.command', cmd);
+        r.store.set('bossai.v1.sendStage.' + cmd.sendId, { stage, commandId: cmd.id });
+      } else r.store.set('bossai.v1.result.' + cmd.id, { ok: true, data: { confirmed: true } });
+      return { closed: false, close() { this.closed = true; } };
+    };
+    await r.api.pump();
+    assert.equal(r.state().task.status, 'running');
+    assert.equal(r.store.get('bossai.v1.command'), null);
+    assert.equal(r.state().outbox[0].status, stage === 'opening' ? 'not-sent' : 'uncertain');
+    assert.equal(r.state().entries[entry.key].handoff, true);
+    const next = chatEntry(r, 'next-' + stage);
+    next.status = 'eligible'; next.taskId = r.state().task.id; next.analysis = { greeting: '您好，我有项目经验' };
+    r.advance(1000); await r.api.pump();
+    assert.equal(opened, 2);
+    assert.equal(r.state().entries[next.key].status, 'contacted');
+  }
+});
