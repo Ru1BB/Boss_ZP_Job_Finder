@@ -12,6 +12,10 @@ async function run(options = {}) {
   const cmd = { id: 'cmd', workerId: 'worker', taskId: s.task.id, sendId: 'send', owner: 'leader', createdAt: now,
     sendDelay: options.sendDelay || 0, type: options.type || 'contact', phase: options.phase || 'chat', savedDetailUrl: options.savedDetailUrl || '', args: { job, text: '您好，我有相关项目经验', historyTail: 'in1', inboundId: 'in1', resumeName: c.resumeName } };
   s.outbox.push({ id: 'send', status: 'pending', taskId: s.task.id });
+  if (options.withoutIntro) {
+    c.includePluginIntro = false;
+    cmd.args.text = C.greetingMessage(cmd.args.text);
+  }
   if (options.reopenAttempt) cmd.args.reopenAttempt = true;
   if (options.retryApproved) { cmd.args.retryApproved = true; s.entries[C.pair(job)] = { job, retryApproved: true }; }
   const history = options.history || (cmd.type === 'contact' ? [] : [{ id: 'in1', role: 'recruiter', text: '请发一份简历', rich: false }]);
@@ -111,6 +115,12 @@ test('greeting fills, focuses, and shows the full send wait with a second-precis
   assert.match(r.banner, /切到前台 [0-9]{2}:[0-9]{2}:[0-9]{2}.*预计等待 0.5 秒/);
   assert.ok(progress[9].at - progress[6].at >= 500);
   assert.deepEqual(r.events.filter(x => ['fill', 'focus', 'send'].includes(x)), ['fill', 'focus', 'send']);
+});
+
+test('worker omits the disabled plugin footer from a previously formatted greeting', async () => {
+  const r = await run({ withoutIntro: true });
+  assert.equal(r.result.data.confirmed, true);
+  assert.equal(r.history.at(-1).text, '您好，我有相关项目经验');
 });
 
 test('failed receipt diagnostics never report success or repeat the click', async () => {

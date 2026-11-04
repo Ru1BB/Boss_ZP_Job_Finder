@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOSS AI 求职助手
 // @namespace    local.boss-ai
-// @version      0.2.14
+// @version      0.2.15
 // @updateURL    https://7355608.site/userscripts/boss-ai.meta.js
 // @downloadURL  https://7355608.site/userscripts/boss-ai.user.js
 // @description  AI 职位筛选、受控沟通与北京时间调度；请先校准页面
@@ -378,7 +378,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     threshold: 80, minDailySalary: 0, maxContacts: 50, sendIntervalSeconds: 180, aiTimeoutSeconds: 180,
     refreshMinSeconds: 10, refreshMaxSeconds: 60,
     beforeOpenSeconds: 0, beforeSendSeconds: 0, nextJobSeconds: 0,
-    scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false,
+    scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false, includePluginIntro: true,
     openRejected: true, verifiedEmptyContact: false,
     switchCategoryOnExhausted: true, debugMode: false,
     internshipOnly: true, requiredCity: '北京', profile: {}
@@ -401,10 +401,14 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     if (job.recruiterName?.trim()) body = body.split(job.recruiterName.trim()).join('您');
     return aiMessage(body);
   }
-  function greetingMessage(text, resume = '', job = {}) {
+  function greetingMessage(text, resume = '', job = {}, includePluginIntro = true) {
+    if (!includePluginIntro) {
+      text = String(text || '').replaceAll(PROJECT_INTRO, '').replaceAll('自动发送项目：' + PROJECT_URL, '');
+    }
     let body = anonymousMessage(text, resume, job);
     if (!body) return '';
     body = body.replaceAll('这是一个基于大模型的求职助手，可分析岗位匹配度并自动发送个性化招呼。', '').trim();
+    if (!includePluginIntro) return body;
     const introduction = PROJECT_INTRO;
     if (!body.includes(introduction)) body += '\n' + introduction;
     if (!body.includes(PROJECT_URL)) body += '\n自动发送项目：' + PROJECT_URL;
@@ -438,7 +442,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     for (const key of ['baseUrl', 'model', 'apiKey', 'resume', 'preferences', 'screeningPrompt', 'greetingPrompt', 'requiredCity']) {
       if (typeof c[key] !== 'string') fail(`配置 ${key} 必须是文字`);
     }
-    for (const key of ['autoSend', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact', 'switchCategoryOnExhausted', 'debugMode']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
+    for (const key of ['autoSend', 'includePluginIntro', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact', 'switchCategoryOnExhausted', 'debugMode']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
     for (const [key, min, max] of [['threshold', 0, 100], ['minDailySalary', 0, 1000000], ['maxContacts', 1, 500],
       ['beforeOpenSeconds', 0, 3600], ['beforeSendSeconds', 0, 3600], ['nextJobSeconds', 0, 3600],
       ['sendIntervalSeconds', 1, 86400], ['refreshMinSeconds', 1, 3600],
@@ -1220,7 +1224,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
 
 (function () {
   'use strict';
-  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.14';
+  const VERSION = typeof GM_info !== 'undefined' && GM_info.script?.version || '0.2.15';
   const C = globalThis.BossCore, { Adapter, DEFAULT_PROFILE } = globalThis.BossAdapter;
   const prefix = 'bossai.v1.', owner = crypto.randomUUID();
   const get = (k, fallback = null) => GM_getValue(prefix + k, fallback);
@@ -1560,7 +1564,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
     if (result.evidenceRecovered && state().task?.status === 'running' && owned()) {
       const s = state(); log(s, '招呼依据不足：已改为引用真实简历片段或中性招呼，继续任务'); persist(s);
     }
-    result.greeting = C.greetingMessage(result.greeting, c.resume, job); return result;
+    result.greeting = C.greetingMessage(result.greeting, c.resume, job, c.includePluginIntro); return result;
   }
   const manualRequests = () => GM_listValues().filter(k => k.startsWith(prefix + 'manualJob.'))
     .map(k => ({ key: k.slice(prefix.length), ...GM_getValue(k) })).sort((a, b) => a.at - b.at);
@@ -1702,8 +1706,8 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
   }
   async function dispatchEntry(entry, kind, payload, taskId) {
     if (!['contact', 'openOnly'].includes(kind)) throw new Error('自动回复和附件功能已移除，请手动处理');
-    if (kind === 'contact') payload = { ...payload, text: C.greetingMessage(payload.text, config().resume, entry.job) };
     const c = config(), s = state();
+    if (kind === 'contact') payload = { ...payload, text: C.greetingMessage(payload.text, c.resume, entry.job, c.includePluginIntro) };
     if (!still(taskId) || !C.canSend(s, c, Date.now(), kind, s.entries[entry.key])) return false;
     const item = C.reserve(s, c, Date.now(), kind, s.entries[entry.key], payload);
     s.task.currentJob = s.entries[entry.key].job;
@@ -2209,7 +2213,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
         if (status === 'ai-sent') { workerFinish(cmd, { confirmed: false, priorAI: true, reason: '发现带 AI 标注的既有外发消息，已跳过重复首聊' }); return; }
         if (status !== 'empty') { workerFinish(cmd, { confirmed: false, notSent: true, reason: status === 'manual-sent' ? '已有人工消息或平台默认招呼，需人工决定如何衔接' : '会话存在招聘者消息或未识别卡片，请人工核对' }); return; }
       }
-      const text = C.greetingMessage(cmd.args.text, c.resume, job);
+      const text = C.greetingMessage(cmd.args.text, c.resume, job, c.includePluginIntro);
       if (!text || C.sensitive(text)) throw new Error('消息为空或涉及关键事项');
       const before = history.map(m => m.id);
       workerProgress(cmd, 'checkingFill', '开始检查填入前执行权');
@@ -2321,7 +2325,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       <label>最低日薪 / 元（0为不限制）</label><input type="number" name="minDailySalary" min="0" max="1000000" step="1"><p class="muted">明确读取到日薪时按范围下限比较；低于该值不分析、不点击沟通、不发招呼。未读到日薪或仅有月薪时继续原流程。</p>
       <label>AI 匹配阈值 / 100</label><input type="number" name="threshold" min="0" max="100"></details>
       <p class="muted">BOSS按所选实习/全职类型筛选，职位符合城市条件且分数达到阈值即可进入发送队列。AI 的“适合/不确定”标记和疑点仅供参考；实际发送仍需授权、窗口和输入框可用，并遵守去重、间隔和额度。</p>
-      <details><summary>AI 提示词</summary><p class="muted">评分标准：${C.SCORING.map(x => x.label + ' ' + x.max + '分').join('；')}。AI 给各项分数，代码加总。“优先/加分项”仅影响最后10分，不重复扣分；岗位没有加分条款时此项按10分中性计入。</p><label>筛选要求</label><textarea name="screeningPrompt"></textarea><label>招呼语要求</label><textarea name="greetingPrompt"></textarea><p class="muted">首条招呼包含插件项目介绍与 GitHub 地址；消息末尾不再追加独立的 AI 发送提醒。</p></details>
+      <details><summary>AI 提示词</summary><p class="muted">评分标准：${C.SCORING.map(x => x.label + ' ' + x.max + '分').join('；')}。AI 给各项分数，代码加总。“优先/加分项”仅影响最后10分，不重复扣分；岗位没有加分条款时此项按10分中性计入。</p><label>筛选要求</label><textarea name="screeningPrompt"></textarea><label>招呼语要求</label><textarea name="greetingPrompt"></textarea><label><input type="checkbox" name="includePluginIntro"> 首条招呼附带插件介绍和 GitHub 链接</label></details>
       <details><summary>页面诊断与高级适配</summary><p class="muted">用于排查页面元素未匹配；正常使用无需修改。只读诊断使用当前表单，不调用AI或发送消息；默认模板需保存后生效。高级适配仅调整读取位置，不恢复已移除的自动回复、附件发送或聊天目标比对。</p><button type="button" id="diagnostic">只读诊断当前页面</button><button type="button" id="defaultProfile">载入默认适配模板</button><pre id="diagnosticOutput"></pre><label>页面适配 JSON（仅 CSS 选择器和流程验证标记）</label><textarea name="profile" rows="8" spellcheck="false"></textarea></details>
       <label><input type="checkbox" name="debugMode"> 调试模式：显示一键页面诊断工具</label><p class="muted">保存后在左下角显示“获取聊天页面信息”，可复制或下载脱敏结构报告。建议先停止任务，再手动打开目标会话采集；调试开关不改变自动发送权限，也不跳过历史去重或发送回执检查。</p>
       <label class="warn"><input type="checkbox" name="autoSend"> 允许 AI 自动发送（默认关闭）</label>
@@ -2535,7 +2539,7 @@ return LocalResumeReader; })(); return localReader.extract(...args); } };
       for (const text of ['薪资：' + (entry.job.salary || '未读取到（不影响运行）'), `${labels[entry.status] || entry.status}${entry.handoff ? ' · 待人工处理' : ''} ${entry.analysis ? entry.analysis.score + '分' : ''}`,
         entry.analysis ? entry.analysis.scoreBreakdown && [1, 2].includes(entry.analysis.scoringVersion) ? '评分构成' + (entry.analysis.scoringVersion === 1 ? '（旧权重）' : '') + '：' + C.SCORING.map(x => x.label + ' ' + entry.analysis.scoreBreakdown[x.key] + '/' + scoreMaxima[x.key]).join('；') + (entry.analysis.hasBonusRequirements ? '' : '（岗位无加分条款，末项中性计分）') : '评分方式：旧版综合评分，未应用分项权重' : '',
         entry.analysis?.reason, entry.analysis?.doubts?.join('；'), entry.note,
-        entry.analysis?.greeting ? '招呼预览：' + C.greetingMessage(entry.analysis.greeting, c.resume, entry.job) : '']) {
+        entry.analysis?.greeting ? '招呼预览：' + C.greetingMessage(entry.analysis.greeting, c.resume, entry.job, c.includePluginIntro) : '']) {
         if (!text) continue; const p = document.createElement('p'); p.textContent = text; el.append(p);
       }
       if (['uncertain', 'retryable'].includes(entry.status)) {

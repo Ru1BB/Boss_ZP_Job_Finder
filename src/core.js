@@ -30,7 +30,7 @@
     threshold: 80, minDailySalary: 0, maxContacts: 50, sendIntervalSeconds: 180, aiTimeoutSeconds: 180,
     refreshMinSeconds: 10, refreshMaxSeconds: 60,
     beforeOpenSeconds: 0, beforeSendSeconds: 0, nextJobSeconds: 0,
-    scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false,
+    scheduleEnabled: false, startTime: '', stopTime: '', autoSend: false, includePluginIntro: true,
     openRejected: true, verifiedEmptyContact: false,
     switchCategoryOnExhausted: true, debugMode: false,
     internshipOnly: true, requiredCity: '北京', profile: {}
@@ -53,10 +53,14 @@
     if (job.recruiterName?.trim()) body = body.split(job.recruiterName.trim()).join('您');
     return aiMessage(body);
   }
-  function greetingMessage(text, resume = '', job = {}) {
+  function greetingMessage(text, resume = '', job = {}, includePluginIntro = true) {
+    if (!includePluginIntro) {
+      text = String(text || '').replaceAll(PROJECT_INTRO, '').replaceAll('自动发送项目：' + PROJECT_URL, '');
+    }
     let body = anonymousMessage(text, resume, job);
     if (!body) return '';
     body = body.replaceAll('这是一个基于大模型的求职助手，可分析岗位匹配度并自动发送个性化招呼。', '').trim();
+    if (!includePluginIntro) return body;
     const introduction = PROJECT_INTRO;
     if (!body.includes(introduction)) body += '\n' + introduction;
     if (!body.includes(PROJECT_URL)) body += '\n自动发送项目：' + PROJECT_URL;
@@ -90,7 +94,7 @@
     for (const key of ['baseUrl', 'model', 'apiKey', 'resume', 'preferences', 'screeningPrompt', 'greetingPrompt', 'requiredCity']) {
       if (typeof c[key] !== 'string') fail(`配置 ${key} 必须是文字`);
     }
-    for (const key of ['autoSend', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact', 'switchCategoryOnExhausted', 'debugMode']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
+    for (const key of ['autoSend', 'includePluginIntro', 'scheduleEnabled', 'internshipOnly', 'openRejected', 'verifiedEmptyContact', 'switchCategoryOnExhausted', 'debugMode']) if (typeof c[key] !== 'boolean') fail(`配置 ${key} 必须是开关值`);
     for (const [key, min, max] of [['threshold', 0, 100], ['minDailySalary', 0, 1000000], ['maxContacts', 1, 500],
       ['beforeOpenSeconds', 0, 3600], ['beforeSendSeconds', 0, 3600], ['nextJobSeconds', 0, 3600],
       ['sendIntervalSeconds', 1, 86400], ['refreshMinSeconds', 1, 3600],

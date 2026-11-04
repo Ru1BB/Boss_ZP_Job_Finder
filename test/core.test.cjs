@@ -2,6 +2,12 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const C = require('../src/core.js');
 
+test('disabling the project introduction removes both footer lines from saved greetings', () => {
+  const body = '您好，我做过实际项目';
+  assert.equal(C.fixedConfig({}).includePluginIntro, true);
+  assert.equal(C.greetingMessage(C.greetingMessage(body), '', {}, false), body);
+});
+
 test('daily salary lower bounds recognize daily amounts and never convert monthly or ambiguous salaries', () => {
   for (const [text, expected] of [['150-300元/天', 150], ['200～300元/日', 200], ['￥200 — ￥400元/天', 200],
     ['180至250元/天', 180], ['200元/天', 200], ['199.5-300元/天', 199.5], ['２００－３００元／天', 200]])
